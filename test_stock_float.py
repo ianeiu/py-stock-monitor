@@ -756,7 +756,7 @@ class TestGuiReviewOnly(unittest.TestCase):
     需真机验证项:
       - sparkline 绘制 (_draw_sparkline 在 Canvas 上画折线)
       - 暂停/继续按钮 (_toggle_pause 改 state["paused"])
-      - 频率控件 (_cycle_freq 循环 1->3->5->1)
+      - 频率控件 (_cycle_freq 循环 1->3->5->10->1)
       - Windows 闪烁 (_flash_window 经 root.after 回主线程)
       - 暗色渲染 (build_style 已逻辑验证, 像素渲染需真机)
     """
@@ -1361,6 +1361,59 @@ name = "Y"
         self.assertEqual([s["code"] for s in result], ["sh600519"])
         parsed = sf.tomllib.loads(self.path.read_text(encoding="utf-8"))
         self.assertEqual([s["code"] for s in parsed.get("stocks", [])], ["sh600519"])
+
+
+# ----------------------------------------------------------------------------
+# N. 刷新频率切换是否需要「可能被 ban」确认框 (纯函数, 无头直测)
+# ----------------------------------------------------------------------------
+class TestRefreshBanWarning(unittest.TestCase):
+    """覆盖 stock_float.refresh_requires_ban_warning 的判定语义。
+
+    该函数为模块级纯函数, 不依赖 Tk / GUI, 可无头直测, 无需 mock。
+    语义: 仅当即将切换到的刷新周期为 1 秒时返回 True(需弹确认框警告
+    数据源可能被限流/封禁), 其余周期一律返回 False。
+    """
+
+    def test_nxt_1_requires_warning(self):
+        """切到 1 秒刷新 -> 必须弹确认框 (True)。"""
+        # Arrange / Act
+        result = sf.refresh_requires_ban_warning(1)
+        # Assert
+        self.assertIs(True, result)
+        self.assertTrue(result)
+
+    def test_nxt_3_no_warning(self):
+        """切到 3 秒刷新 -> 不弹确认框 (False)。"""
+        result = sf.refresh_requires_ban_warning(3)
+        self.assertIs(False, result)
+        self.assertFalse(result)
+
+    def test_nxt_5_no_warning(self):
+        """切到 5 秒刷新 -> 不弹确认框 (False)。"""
+        result = sf.refresh_requires_ban_warning(5)
+        self.assertIs(False, result)
+        self.assertFalse(result)
+
+    def test_nxt_2_no_warning_strict_equality(self):
+        """切到 2 秒刷新 -> 不弹确认框 (False)。
+
+        证明判定是严格等于 1, 而非「小于等于某个阈值」。
+        """
+        result = sf.refresh_requires_ban_warning(2)
+        self.assertIs(False, result)
+        self.assertFalse(result)
+
+    def test_nxt_0_no_warning(self):
+        """切到 0 秒(暂停/停更) -> 不弹确认框 (False)。"""
+        result = sf.refresh_requires_ban_warning(0)
+        self.assertIs(False, result)
+        self.assertFalse(result)
+
+    def test_nxt_ten_no_warning(self):
+        """切到较大周期(10 秒) -> 不弹确认框 (False)。"""
+        result = sf.refresh_requires_ban_warning(10)
+        self.assertIs(False, result)
+        self.assertFalse(result)
 
 
 if __name__ == "__main__":

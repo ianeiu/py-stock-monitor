@@ -1407,6 +1407,18 @@ def apply_sig_visibility(sf_, visible, sig_pack):
             sf_.pack_forget()
 
 
+def refresh_requires_ban_warning(nxt_sec: int) -> bool:
+    """切到 1 秒刷新时需弹确认框警告数据源可能被限流/封禁。
+
+    Args:
+        nxt_sec: 即将切换到的刷新周期(秒)。
+
+    Returns:
+        仅当切到 1 秒刷新时返回 True(需警告), 其余周期返回 False。
+    """
+    return nxt_sec == 1
+
+
 def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict], None]] = None,
             notifier: Optional[Notifier] = None, cooldown: float = 0.0,
             stocks_path: Optional[str] = None) -> None:
@@ -1421,7 +1433,7 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     # 透明度(0~1, 非法/越界回退默认)
     _a = settings.get("float_alpha", ALPHA_DEFAULT)
     alpha = _a if isinstance(_a, (int, float)) and 0 < _a <= 1 else ALPHA_DEFAULT
-    # 刷新周期(默认1s; 频率控件在 1/3/5 间循环)
+    # 刷新周期(默认5s; 频率控件在 1/3/5/10 间循环)
     try:
         refresh_sec = max(1, int(_to_float(settings.get("refresh_sec")) or 1))
     except (TypeError, ValueError):
@@ -1438,7 +1450,7 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     # ---- 顶部拖拽条 ----
     header = tk.Frame(root, bg=style["header"], height=14)
     header.pack(fill="x")
-    htitle = tk.Label(header, text="  行情 · 每秒刷新", bg=style["header"], fg=style["fg_dim"],
+    htitle = tk.Label(header, text="  行情", bg=style["header"], fg=style["fg_dim"],
                       font=style["FONT_SM"], anchor="w")
     htitle.pack(side="left", padx=(3, 0))
 
@@ -1725,7 +1737,17 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
 
     def _cycle_freq():
         cur = state["refresh_sec"]
-        nxt = {1: 3, 3: 5, 5: 1}.get(cur, 1)
+        nxt = {1: 3, 3: 5, 5: 10, 10: 1}.get(cur, 1)
+        # 切到 1 秒刷新频率极可能触发免费源限流/封禁, 需用户确认
+        if refresh_requires_ban_warning(nxt):
+            ok = messagebox.askyesno(
+                "频率警告",
+                "1 秒刷新会非常频繁地请求行情数据源，可能被限流甚至封禁 IP。\n\n"
+                "确定仍要使用 1 秒刷新吗？",
+                parent=root,
+            )
+            if not ok:
+                return  # 用户取消, 保持当前频率不变
         state["refresh_sec"] = nxt
         freq_btn.config(text=f" {nxt}s ")
 
