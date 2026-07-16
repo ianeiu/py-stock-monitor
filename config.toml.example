@@ -1,0 +1,76 @@
+# ============================================================
+# 股票浮窗 stock_float.py —— 配置示例 (config.toml)
+# 复制本文件为 config.toml 后按需修改; 修改后直接重跑脚本生效。
+# 说明: 本文件管【外观 / 通知 / 落盘存储 / 运行参数】的 [settings]。
+#       监控引擎类配置(指标打分 / 盘中灵敏 / 变动阈值 / 冷却)
+#       放 stocks.toml 的 [settings] (见 stocks.toml.example)。
+#       运行参数(行情源 / 刷新频率)本文件即放 config.toml(见下方「运行参数」分组)。
+#       同一键若 config.toml 与 stocks.toml 都有, stocks.toml 优先(向后兼容:
+#       你仍可在 config.toml 写监控策略键 indicators / live_indicators, 仍能用,
+#       只是官方文档归属是 stocks.toml; 运行参数 sources / refresh_sec 本就是本文件原生键)。
+# ============================================================
+
+[settings]
+
+# ---- 落盘 ----
+# csv_mode: daily(按天滚动到 signals_YYYY-MM-DD.csv) | 其它(单文件 signals.csv)
+csv_mode = "daily"
+
+# CSV 去重窗口(秒, 默认60): 同一只股票 signal 与 price 都未变且落在窗口内则跳过落盘
+# (配合省流触发规则使用, 避免重复写盘; 设为 0 关闭去重)
+csv_dedup_sec = 60
+
+# ---- 浮窗外观 ----
+# float_theme: light(亮) / dark(暗) / auto(跟随系统, mac 读 defaults, win 读注册表)
+float_theme = "light"
+# 字体族与字号(默认 Menlo / 7; 字号过小看不清, 过大占屏)
+float_font = "Menlo"
+float_font_size = 7
+# 迷你走势图(sparkline)开关(默认开 true; 嫌占屏可设 false 关闭每行右侧走势图)
+show_sparkline = true
+# 界面颜色灰色程度(强调色去饱和) 0.0~1.0; 0=原色(红涨绿跌), 1=纯灰阶, 0.6=轻度去色
+grayness = 0.0
+
+# 浮窗涨跌幅颜色 (十六进制, 浮窗 GUI 专用; 不填则用内置默认)
+# float_up_color:   涨的颜色 (例: 红 "#d93025")
+# float_down_color: 跌的颜色 (例: 绿 "#188038")
+# 颜色用 #RRGGBB 或 #RGB; 填错(非合法 hex)自动回退默认
+# float_up_color = "#e5c9c7"
+# float_down_color = "#bfdcc7"
+
+# 浮窗信号档位颜色 (十六进制, 浮窗 GUI 专用; 不填则用内置默认)
+# 五个档位对应: 买入(偏强)/轻仓偏多/持有观望/减仓偏空/卖出(偏弱)
+# sig_buy = "#e4c8c5"
+# sig_long = "#e4dbd3"
+# sig_hold = "#d3d9e2"
+# sig_short = "#bccbdc"
+# sig_sell = "#cfe1d4"
+
+# 浮窗透明度 (0~1, 不填用默认 0.94); 1=完全不透明, 越小越透明
+# float_alpha = 0.94
+
+# ---- 运行参数 ----
+# sources: 行情源兜底顺序(全部免费公开源; 主源=索引0)
+#   主源腾讯失败会顺序尝试备用; 主源异常仅告警一次
+#   想关备用源只留主源: sources = ["tencent"]
+sources = ["tencent", "sina", "eastmoney"]
+
+# refresh_sec: 浮窗刷新周期(秒, 默认1)
+#   浮窗内可用右上角频率控件在 1/3/5s 间循环覆盖
+refresh_sec = 1
+
+# ---- 通知 (跨平台: mac AppleScript / linux notify-send / win 蜂鸣+闪烁) ----
+# notify:       true 开启系统通知 (默认 false)
+# notify_sound: true 通知带声音 (默认 false; Windows 用蜂鸣兜底)
+# 想安静盯盘时开启, 有异动(信号变动/阈值破位/支撑压力穿越)自动弹通知
+# notify = true
+# notify_sound = true
+
+# ============================================================
+# 监控引擎类配置(指标打分 / 盘中灵敏 / 变动阈值 / 冷却)
+# 放 stocks.toml 的 [settings], 见 stocks.toml.example。
+# 为向后兼容: 本文件仍可写 indicators / live_indicators(监控策略键), 仍可用,
+# 只是官方文档归属是 stocks.toml(同一键两处都有时 stocks.toml 优先)。
+# 运行参数 sources / refresh_sec 本就是本文件原生键(见上方「运行参数」分组),
+# 直接写即可, 无需列入兼容说明。
+# ============================================================

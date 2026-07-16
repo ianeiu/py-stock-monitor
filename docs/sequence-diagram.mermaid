@@ -1,0 +1,53 @@
+sequenceDiagram
+    autonumber
+    participant W as worker(后台线程)
+    participant DS as DataSource
+    participant T as TencentSource
+    participant B as 备用源(Sina/Eastmoney)
+    participant SE as monitor(SignalEngine)
+    participant N as Notifier
+    participant CSV as append_signal
+    participant R as refresh(GUI主线程)
+    participant Root as Tk root
+
+    Note over W,Root: 启动: warm_klines -> run_hud 建窗 + worker/refresh 并发
+
+    loop 每 refresh_sec (state.paused 时跳过 fetch)
+        W->>DS: fetch(code)
+        DS->>T: fetch(code)
+        alt 主源(腾讯)异常
+            DS->>B: 顺序尝试备用源
+            DS-->>W: alert_fn("主源异常,已切备用") 仅1次
+        else 全部成功
+            T-->>DS: (price,prev,open,ts,high,low,vol,delayed)
+        end
+        DS-->>W: rt 元组(8字段)
+        W->>SE: monitor(stock, prev_sig, rt, settings)
+        SE->>SE: 按 indicators 动态打分(默认 MA/RSI/MACD)
+        SE-->>W: (text, sig, rec)  # rec 含 kline
+        W->>W: 省流规则 + 冷却判定(信号/阈值/支撑压力穿越)
+        alt 触发(首屏/信号变动/阈值穿越/支撑压力穿越)
+            W->>CSV: append_signal(rec)  # 含去重逻辑
+            W->>N: notify(line)
+            alt macOS
+                N->>N: notify_mac (AppleScript)
+            else Linux
+                N->>N: subprocess notify-send
+            else Windows
+                N->>N: winsound.Beep(880,200)
+                N->>Root: flash_fn() 经 root.after 回主线程
+                Root->>Root: _flash_window() 闪烁 ~1s
+            end
+        end
+        W->>W: data.update(rec) [加锁 lock]
+        W->>W: last_sigs[code] 记录 sig/阈值/last_price
+        W->>W: time.sleep(refresh_sec)
+    end
+
+    loop 每 250ms (root.after)
+        R->>R: 加锁读 data 快照
+        R->>R: 更新行情行标签(价/涨跌幅/延时/信号点)
+        R->>R: 更新信号提示(档位/多空)
+        R->>R: Canvas 画 sparkline(rec.kline + 实时价)
+        R->>Root: root.after(250, refresh)
+    end

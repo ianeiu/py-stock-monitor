@@ -1,0 +1,72 @@
+# ============================================================
+# 股票浮窗 stock_float.py —— 股票列表 + 监控引擎配置示例 (stocks.toml)
+# 复制本文件为 stocks.toml 后按需修改; 修改后直接重跑脚本生效。
+# 说明: 本文件顶部 [settings] 放【监控策略 + 变动阈值 / 冷却】:
+#         - 监控策略: indicators / live_indicators
+#         - 变动阈值: chg_alert / swing_alert / alert_cooldown
+#       行情源 / 刷新频率等运行参数放 config.toml 的 [settings] (见 config.toml.example)。
+#       下方 [[stocks]] 放股票, code 为腾讯财经代码, name 为显示名。
+#       同一键若 config.toml 与 stocks.toml 都有, stocks.toml 优先。
+# ============================================================
+
+[settings]
+
+# ---- 指标打分 (默认 ["MA","RSI","MACD"], 与改造前权重逐字一致) ----
+# 可选追加: KDJ / BOLL / VOLUME (开启即参与打分, 信号更灵敏)
+# 例: indicators = ["MA", "RSI", "MACD", "KDJ", "BOLL"]
+# 仅 VOLUME 会额外拉一次历史量(默认关, 不增加请求); KDJ/BOLL 用现有日K计算
+indicators = ["MA", "RSI", "MACD"]
+
+# ---- 盘中灵敏 (默认开启) ----
+# 实时价作为"当日收盘"并入 MA/RSI/MACD 序列, 指标盘中随实时价跳动, 金叉/死叉盘中可触发
+# 改为 false 则只用日K收盘算指标(金叉/死叉仅收盘后变)
+live_indicators = true
+
+# ---- 变动提示阈值 (%, 省流模式生效; 设为 0 或注释掉即关闭) ----
+# chg_alert:   涨跌幅绝对值越过该值 -> 提示 (例: 3 即 ±3% 触发)
+# swing_alert: 日内运行波动(振幅=(最高-最低)/昨收)越过该值 -> 提示
+chg_alert = 3.0
+swing_alert = 5.0
+
+# 阈值提醒冷却(分钟, 默认 15): 同一只同一类阈值在冷却期内只提示一次
+# 设为 0 可关闭冷却(完全依赖穿越判定)
+alert_cooldown = 15
+
+# ============================================================
+# 股票列表
+# code 前缀: hk(港股) / sh,sz(A股) / us(美股)
+# 个股可覆盖全局阈值: 加 chg_alert / swing_alert
+# 支撑/压力预警(可选, 可多个价位): support / resistance
+#   价格下穿 support 任一则弹通知+写CSV("跌破支撑X")
+#   价格上穿 resistance 任一则弹通知+写CSV("突破阻力X")
+#   需 notify=true 才弹通知; 穿越判定同样受 alert_cooldown 冷却约束
+# ============================================================
+[[stocks]]
+code = "hk01810"
+name = "小米集团-W"
+support = [18.0, 17.5]        # 支撑预警价(可多个)
+resistance = [20.5, 21.0]     # 压力预警价(可多个)
+
+[[stocks]]
+code = "sh600062"
+name = "华润双鹤"
+
+[[stocks]]
+code = "sh600011"
+name = "华能"
+
+[[stocks]]
+code = "sz000100"
+name = "TCL"
+chg_alert = 4.0     # 覆盖全局阈值(波动大, 放宽)
+swing_alert = 6.0
+
+[[stocks]]
+code = "sz159834"
+name = "金ETF"
+
+# [[stocks]]
+# code = "usAAPL"
+# name = "苹果"
+# support = [200.0]
+# resistance = [240.0]

@@ -1,0 +1,125 @@
+classDiagram
+    %% ===== 数据源层 =====
+    class RealTimeSource {
+        <<abstract>>
+        +name: str
+        +fetch(code: str) RT
+    }
+    class TencentSource {
+        +fetch(code: str) RT
+    }
+    class SinaSource {
+        +fetch(code: str) RT
+    }
+    class EastmoneySource {
+        +fetch(code: str) RT
+    }
+    RealTimeSource <|-- TencentSource
+    RealTimeSource <|-- SinaSource
+    RealTimeSource <|-- EastmoneySource
+
+    class DataSource {
+        -sources: list~RealTimeSource~
+        -alert_fn: callable
+        -_alerted: bool
+        +fetch(code: str) RT
+    }
+    DataSource o-- RealTimeSource
+
+    %% ===== 通知层 =====
+    class Notifier {
+        -enabled: bool
+        -sound: bool
+        -flash_fn: callable
+        +notify(msg: str)
+        -_notify_linux(msg)
+        -_notify_windows(msg)
+    }
+
+    %% ===== 指标层(纯函数命名空间) =====
+    class Indicator {
+        <<namespace pure fns>>
+        +sma(vals, n)
+        +ema_series(vals, n)
+        +rsi(closes, n)
+        +macd(closes, fast, slow, sig)
+        +kdj(closes, n, kp, dp) (新增)
+        +bollinger(closes, n, k) (新增)
+        +get_volume_hist(code) (可选)
+    }
+
+    %% ===== 信号引擎 =====
+    class SignalEngine {
+        +SCORERS: dict
+        +DEFAULT_INDICATORS: list
+        +monitor(stock, prev_sig, rt, settings) tuple
+        +map_signal(net, prev_sig)
+    }
+    SignalEngine ..> Indicator : 调用
+
+    %% ===== 样式 =====
+    class StyleSet {
+        +bg / fg / fg_dim
+        +up / down / flat / dl
+        +header / sep
+        +sig_colors: dict
+        +FONT / FONT_SM / ROW_H
+    }
+    class StyleBuilder {
+        +detect_system_theme() str
+        +build_style(settings) StyleSet
+    }
+
+    %% ===== GUI =====
+    class Hud {
+        -state: dict(paused, refresh_sec)
+        -data: dict
+        -last_sigs: dict
+        -lock: Lock
+        +run_hud(stocks, settings, ...)
+        -worker()
+        -refresh()
+        -_flash_window()
+    }
+    Hud ..> DataSource : fetch
+    Hud ..> SignalEngine : monitor
+    Hud ..> Notifier : notify
+    Hud ..> StyleSet : 使用样式
+
+    %% ===== 配置/落盘 =====
+    class Config {
+        +load_settings() dict
+        +load_stocks(settings) list
+        +_normalize(raw) list
+    }
+    class CsvStore {
+        +signals_path(mode) str
+        +append_signal(rec, path)
+        +review_csv(n, path, code, date)
+    }
+
+    %% ===== 关键数据结构 =====
+    class Stock {
+        +code: str
+        +name: str
+        +chg_alert: float
+        +swing_alert: float
+        +support: list~float~
+        +resistance: list~float~
+    }
+    class Rec {
+        +datetime / code / name
+        +price / chg_pct / open / prev_close
+        +ma5 / ma10 / ma20 / rsi
+        +macd_dif/dea/hist
+        +bull / bear / net / signal
+        +reasons / delayed / ts
+        +k / d / j (新增)
+        +boll_mid/up/low (新增)
+        +volume / vol_ma5 (新增)
+        +kline (运行时, 不入CSV)
+    }
+    Hud ..> Stock : 监控
+    SignalEngine ..> Rec : 产出
+    CsvStore ..> Rec : 落盘
+    Config ..> Stock : 构建
