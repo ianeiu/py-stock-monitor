@@ -884,6 +884,15 @@ def load_settings() -> dict:
     return merged
 
 
+def set_topmost(root, on: bool) -> None:
+    """设置窗口是否置顶(always-on-top)。薄封装 root.attributes, 便于无头桩测试。
+
+    约定: 置顶为运行时态(启动从 config 读默认, 运行中切换, 不回写文件),
+    与 filter_on / show_sparkline 保持一致。
+    """
+    root.attributes("-topmost", bool(on))
+
+
 def load_stocks(settings: Optional[dict] = None) -> List[dict]:
     """从股票列表文件读取 [[stocks]]; 找不到回退默认。个股阈值/支撑压力缺省由全局兜底。"""
     res = _load_first(STOCKS_CANDIDATES)
@@ -1488,7 +1497,7 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     root = tk.Tk()
     root.title("")
     root.overrideredirect(True)           # 去标题栏/边框 -> 浮动
-    root.attributes("-topmost", True)     # 置顶
+    set_topmost(root, bool(settings.get("topmost", True)))  # 置顶(启动默认由 config 决定)
     root.attributes("-alpha", alpha)       # 透明度, 由 float_alpha 配置控制
     root.configure(bg=style["bg"])
     root.resizable(False, False)
@@ -1540,6 +1549,15 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     spark_btn.pack(side="right", padx=(0, 2))
     spark_btn.bind("<Button-1>", lambda e: _toggle_sparkline())
 
+    # 窗口置顶开关: 📌 按钮(功能④)
+    # 注意: 此处 ui 字典尚未定义(L1566 之后), 故直接读 settings 默认(与 ui["topmost"] 同源)
+    _top_on = bool(settings.get("topmost", True))
+    top_btn = tk.Label(header, text=(" 📌 " if _top_on else " 📍 "), bg=style["header"],
+                       fg=(style["fg"] if _top_on else style["fg_dim"]),
+                       font=style["FONT_SM"], cursor="hand2")
+    top_btn.pack(side="right", padx=(0, 2))
+    top_btn.bind("<Button-1>", lambda e: _toggle_topmost())
+
     drag = {"x": 0, "y": 0}
 
     def start_drag(e):
@@ -1563,7 +1581,9 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     last_sig_change: Dict[str, float] = {}
     # 手动排序: 记录每行行情行右侧的上移/下移箭头部件, 用于边界灰显
     move_btns: Dict[str, tuple] = {}
-    ui = {"filter_on": bool(settings.get("filter_on", True)), "show_sparkline": bool(settings.get("show_sparkline", False))}
+    ui = {"filter_on": bool(settings.get("filter_on", True)),
+          "show_sparkline": bool(settings.get("show_sparkline", False)),
+          "topmost": bool(settings.get("topmost", True))}
     QUOTE_PACK = dict(fill="x", padx=3, pady=1)
     SIG_PACK = dict(fill="x", padx=5, pady=(0, 1))
 
@@ -1751,6 +1771,15 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         """切换迷你 sparkline 走势图显示(功能③); root.after(0) 回主线程执行 UI 操作。"""
         ui["show_sparkline"] = not ui["show_sparkline"]
         root.after(0, _apply_sparkline, ui["show_sparkline"])
+
+    def _toggle_topmost():
+        """切换窗口置顶(always-on-top)(功能④)。用户点击 header 按钮, 本就在主线程, 直接同步调用。"""
+        ui["topmost"] = not ui["topmost"]
+        on = ui["topmost"]
+        top_btn.config(text=("📌" if on else "📍"),
+                       fg=(style["fg"] if on else style["fg_dim"]))
+        set_topmost(root, on)
+        status.config(text=("📌 窗口置顶" if on else "📍 取消置顶"))
 
     def _add_stock_dialog():
         """弹输入对话框解析并添加自选(功能①)。"""

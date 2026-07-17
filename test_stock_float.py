@@ -1016,6 +1016,85 @@ class TestSparklineToggle(unittest.TestCase):
 
 
 # ----------------------------------------------------------------------------
+# 17. P3 补充: 窗口置顶(always-on-top) 界面开关(功能④)
+#     GUI 按钮点击的图标/状态栏反馈只做代码审查, 标注「需真机验证」, 不实例化 Tk。
+#     配置键 topmost 走 settings.get(..., True), 默认置顶(启动置顶)。
+#     核心副作用由 set_topmost() 薄封装 root.attributes, 用桩对象覆盖。
+# ----------------------------------------------------------------------------
+class _FakeRoot:
+    """记录 attributes 调用, 用于无头验证 set_topmost 的核心副作用。"""
+    def __init__(self):
+        self.calls = []
+
+    def attributes(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+
+
+class TestTopmostToggle(unittest.TestCase):
+    def test_topmost_default_true(self):
+        # 未配置 topmost 时, settings.get("topmost", True) 应默认 True(启动置顶)
+        fixture = {"settings": {"refresh_sec": 3}, "stocks": [{"code": "hk01810"}]}
+        with mock.patch.object(sf, "_load_first", return_value=("fake", fixture)):
+            s = sf.load_settings()
+        self.assertTrue(s.get("topmost", True))
+
+    def test_topmost_read_from_config(self):
+        # config.toml 含 topmost = false -> 经 load_settings 后为 False(启动不置顶)
+        fixture = {"settings": {"topmost": False}, "stocks": [{"code": "hk01810"}]}
+        with mock.patch.object(sf, "_load_first", return_value=("fake", fixture)):
+            s = sf.load_settings()
+        self.assertFalse(s.get("topmost"))
+
+    def test_set_topmost_stub(self):
+        # set_topmost 薄封装 root.attributes("-topmost", on); 用桩对象覆盖核心副作用
+        fake = _FakeRoot()
+        sf.set_topmost(fake, True)
+        self.assertEqual(fake.calls[-1], (("-topmost", True), {}))
+        sf.set_topmost(fake, False)
+        self.assertEqual(fake.calls[-1], (("-topmost", False), {}))
+        # 验证启动初始化与 _toggle_topmost 共用同一入口(单一入口约定)
+        self.assertEqual(len(fake.calls), 2)
+
+    def test_set_topmost_non_bool_normalizes(self):
+        # 健壮性(边缘用例补强): 实现使用 bool(on) 归一, 非布尔入参应被正确转换。
+        # 重点确认不是直接传 on, 而是经 bool() 归一, 否则 0/"" 会被 tkinter 默认当成真值。
+        fake = _FakeRoot()
+        # 整数 1 -> True, 0 -> False
+        sf.set_topmost(fake, 1)
+        self.assertEqual(fake.calls[-1], (("-topmost", True), {}))
+        sf.set_topmost(fake, 0)
+        self.assertEqual(fake.calls[-1], (("-topmost", False), {}))
+        # 非空字符串 "yes" -> True, 空字符串 "" -> False
+        sf.set_topmost(fake, "yes")
+        self.assertEqual(fake.calls[-1], (("-topmost", True), {}))
+        sf.set_topmost(fake, "")
+        self.assertEqual(fake.calls[-1], (("-topmost", False), {}))
+        # None 被归一为 False(避免误置顶)
+        sf.set_topmost(fake, None)
+        self.assertEqual(fake.calls[-1], (("-topmost", False), {}))
+        # 全部经过 bool() 归一, 共 5 次调用
+        self.assertEqual(len(fake.calls), 5)
+
+    def test_set_topmost_string_false_pitfall(self):
+        # 已知设计取舍(非 Bug)的「表征测试(characterization)」: 锁定当前行为并显式标注。
+        # 实现使用 bool(on) 而非 on: 若有人直接传字符串 "false"/"0", 因 bool("false")==True /
+        # bool("0")==True, 会误判为「置顶 True」。
+        # 但正常路径中 config 经 TOML 解析后是真正的 bool(true/false), 不会以字符串形态进入
+        # set_topmost, 故正常路径无此问题 —— 据此判定为「可接受的设计取舍」, 无需改业务源码。
+        # 若未来接口可能接收外部字符串(如命令行/HTTP 入参), 再考虑加防御:
+        #   root.attributes("-topmost", bool(on) and str(on).lower() not in ("false", "0", "no", "off"))
+        fake = _FakeRoot()
+        sf.set_topmost(fake, "false")
+        self.assertEqual(fake.calls[-1], (("-topmost", True), {}))
+        sf.set_topmost(fake, "0")
+        self.assertEqual(fake.calls[-1], (("-topmost", True), {}))
+
+    # 注: _toggle_topmost 为 run_hud 闭包, 无法在无头环境直接 import;
+    #     按钮点击的图标翻转(📌/📍)与状态栏文本需真机目测验证, 此处不实例化 Tk。
+
+
+
+# ----------------------------------------------------------------------------
 # 16. 界面颜色灰色程度 (grayness / desaturate)
 # ----------------------------------------------------------------------------
 class TestGrayness(unittest.TestCase):

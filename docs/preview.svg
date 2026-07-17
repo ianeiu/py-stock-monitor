@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 348" font-family="'PingFang SC','Hiragino Sans GB','Microsoft YaHei',sans-serif">
+  <!-- 桌面背景 -->
+  <rect width="560" height="348" fill="#dfe3e8"/>
+  <rect width="560" height="348" fill="#000000" opacity="0.02"/>
+
+  <!-- 浮窗投影 -->
+  <rect x="48" y="48" width="480" height="272" rx="12" fill="#000000" opacity="0.18"/>
+
+  <!-- 浮窗主体 (无边框 / 半透明 / 可拖动) -->
+  <rect x="40" y="40" width="480" height="272" rx="12" fill="#1e2227" stroke="#0c0e10" stroke-width="1"/>
+
+  <!-- 顶部拖拽条 -->
+  <path d="M40,52 Q40,40 52,40 L508,40 Q520,40 520,52 L520,66 L40,66 Z" fill="#2b3138"/>
+  <text x="52" y="58" fill="#c8ccd0" font-size="13" font-weight="600">行情</text>
+
+  <!-- 顶部按钮区 (右侧) -->
+  <!-- 关闭 × -->
+  <rect x="494" y="45" width="22" height="16" rx="4" fill="#333a42"/>
+  <text x="505" y="57" fill="#c8ccd0" font-size="13" text-anchor="middle">×</text>
+  <!-- 频率 5s -->
+  <rect x="466" y="45" width="22" height="16" rx="4" fill="#333a42"/>
+  <text x="477" y="56" fill="#c8ccd0" font-size="10" text-anchor="middle">5s</text>
+  <!-- 暂停 -->
+  <rect x="442" y="45" width="22" height="16" rx="4" fill="#333a42"/>
+  <rect x="449" y="48" width="3" height="10" rx="1" fill="#c8ccd0"/>
+  <rect x="455" y="48" width="3" height="10" rx="1" fill="#c8ccd0"/>
+  <!-- 添加 ＋ -->
+  <rect x="418" y="45" width="22" height="16" rx="4" fill="#333a42"/>
+  <text x="429" y="58" fill="#c8ccd0" font-size="14" text-anchor="middle">+</text>
+  <!-- 仅变动 🔍 (放大镜) -->
+  <circle cx="401" cy="51" r="5" fill="none" stroke="#c8ccd0" stroke-width="1.5"/>
+  <line x1="404" y1="54" x2="409" y2="59" stroke="#c8ccd0" stroke-width="1.5"/>
+  <!-- 走势 📈 (折线) -->
+  <polyline points="372,55 377,49 382,54 387,49 392,55" fill="none" stroke="#c8ccd0" stroke-width="1.5"/>
+  <!-- 置顶 📌 (高亮, 新增) -->
+  <rect x="344" y="44" width="26" height="18" rx="4" fill="#1f3a5a" stroke="#4a9eff" stroke-width="1.5"/>
+  <circle cx="357" cy="49" r="4" fill="#4a9eff"/>
+  <line x1="357" y1="53" x2="357" y2="59" stroke="#4a9eff" stroke-width="2"/>
+  <!-- NEW 角标 -->
+  <rect x="346" y="24" width="34" height="13" rx="3" fill="#4a9eff"/>
+  <text x="363" y="34" fill="#ffffff" font-size="9" font-weight="700" text-anchor="middle">NEW</text>
+
+  <!-- 行情行 1 -->
+  <text x="52" y="100" fill="#eef1f3" font-size="13">小米集团-W</text>
+  <text x="52" y="116" fill="#8a9099" font-size="10">hk01810</text>
+  <circle cx="236" cy="98" r="4" fill="#2ecc71"/>
+  <text x="250" y="102" fill="#eef1f3" font-size="15">19.85</text>
+  <text x="250" y="118" fill="#2ecc71" font-size="12">+2.31%</text>
+  <polyline points="360,118 375,112 390,116 405,104 420,108 435,96 450,100 465,90 480,94 495,84 505,86" fill="none" stroke="#4a9eff" stroke-width="1.5"/>
+
+  <!-- 行情行 2 -->
+  <text x="52" y="168" fill="#eef1f3" font-size="13">贵州茅台</text>
+  <text x="52" y="184" fill="#8a9099" font-size="10">sh600519</text>
+  <circle cx="236" cy="166" r="4" fill="#ff5c5c"/>
+  <text x="250" y="170" fill="#eef1f3" font-size="15">1685.00</text>
+  <text x="250" y="186" fill="#ff5c5c" font-size="12">-0.85%</text>
+  <polyline points="360,186 375,188 390,182 405,190 420,186 435,196 450,192 465,200 480,196 495,204 505,206" fill="none" stroke="#4a9eff" stroke-width="1.5"/>
+
+  <!-- 行情行 3 -->
+  <text x="52" y="236" fill="#eef1f3" font-size="13">Apple</text>
+  <text x="52" y="252" fill="#8a9099" font-size="10">usAAPL</text>
+  <circle cx="236" cy="234" r="4" fill="#2ecc71"/>
+  <text x="250" y="238" fill="#eef1f3" font-size="15">228.30</text>
+  <text x="250" y="254" fill="#2ecc71" font-size="12">+0.42%</text>
+  <polyline points="360,254 375,250 390,252 405,246 420,248 435,242 450,244 465,240 480,242 495,236 505,238" fill="none" stroke="#4a9eff" stroke-width="1.5"/>
+
+  <!-- 状态栏 -->
+  <rect x="40" y="282" width="480" height="30" fill="#23282e"/>
+  <circle cx="54" cy="297" r="4" fill="#4a9eff"/>
+  <line x1="54" y1="293" x2="54" y2="299" stroke="#4a9eff" stroke-width="2"/>
+  <text x="66" y="301" fill="#b9c0c7" font-size="11">Always-on-top: ON（点击 📌 切换置顶 / 取消置顶）</text>
+</svg>
