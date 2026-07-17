@@ -57,9 +57,9 @@ grayness = 0.0
 #   想关备用源只留主源: sources = ["tencent"]
 sources = ["tencent", "sina", "eastmoney"]
 
-# refresh_sec: 浮窗刷新周期(秒, 默认1)
-#   浮窗内可用右上角频率控件在 1/3/5s 间循环覆盖
-refresh_sec = 1
+# refresh_sec: 浮窗刷新周期(秒, 默认5)
+#   浮窗内可用右上角频率控件在 1/3/5/10s 间循环覆盖
+refresh_sec = 5
 
 # ---- 通知 (跨平台: mac AppleScript / linux notify-send / win 蜂鸣+闪烁) ----
 # notify:       true 开启系统通知 (默认 false)
