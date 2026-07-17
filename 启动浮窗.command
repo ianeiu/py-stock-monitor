@@ -48,8 +48,5 @@ fi
 
 echo "▶ 使用解释器: $PY"
 echo "▶ 启动股票浮窗 (浮动窗口, 实时刷新; 拖顶部条可移动, 🗑/右键删除自选)"
-"$PY" stock_float.py
-
-echo ""
-echo "■ 浮窗已关闭。"
-read -r _ 2>/dev/null
+# exec 替换 bash 进程(仅剩 python3 一层), 关窗不再弹 "终止进程?" 确认框
+exec "$PY" stock_float.py

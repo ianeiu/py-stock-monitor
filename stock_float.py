@@ -993,11 +993,14 @@ def _serialize_stocks(stocks: List[dict]) -> str:
 
 
 def rewrite_stocks_toml(path: str, add: Optional[dict] = None,
-                        remove: Optional[str] = None) -> List[dict]:
+                        remove: Optional[str] = None,
+                        reorder: Optional[List[str]] = None) -> List[dict]:
     """功能① 保留式重写 stocks.toml: 保留文件头注释与 [settings] 段, 仅重写 [[stocks]] 区块。
 
     - add: parse_add_input 返回的 stock dict(或含 code/name 的 dict); 若 code 已存在则忽略(去重)。
     - remove: 要删除的股票 code。
+    - reorder: 可选, 给定 code 顺序列表, 在序列化前据此重排 stocks
+      (不在列表中的 code 保持原相对序追加于末尾)。add/remove 调用方不传, 保持向后兼容。
     返回最终生效的股票列表(List[dict], 经 _normalize)。文件不存在 / 无法解析 -> 抛异常。
     """
     if tomllib is None:
@@ -1021,6 +1024,8 @@ def rewrite_stocks_toml(path: str, add: Optional[dict] = None,
             if add.get("swing_alert") is not None:
                 new_stock["swing_alert"] = add["swing_alert"]
             stocks.append(new_stock)
+    if reorder is not None:
+        stocks = _reorder_stocks(stocks, reorder)
     prefix = _extract_toml_prefix(raw)
     body = _serialize_stocks(stocks)
     content = prefix.rstrip("\n")
@@ -1052,6 +1057,47 @@ def remove_stock_from_memory(stocks: List[dict], code: str,
         for d in bookkeeping.values():
             d.pop(code, None)
     return removed
+
+
+def move_stock_in_order(order: List[str], code: str, direction: str) -> List[str]:
+    """在 code 顺序列表 order 中, 把 code 上移一步(direction='up')或下移一步(direction='down')。
+
+    边界: code 不在 order / 已是首元素却上移 / 已是末元素却下移 -> 返回原 order 副本(不变)。
+    返回新列表, 不原地修改入参。
+
+    本函数为纯计算, 不触碰 Tk / 文件, 可直接无头单测。
+    """
+    if code not in order:
+        return list(order)
+    i = order.index(code)
+    if direction == "up":
+        if i == 0:
+            return list(order)
+        j = i - 1
+    elif direction == "down":
+        if i == len(order) - 1:
+            return list(order)
+        j = i + 1
+    else:
+        return list(order)
+    new_order = list(order)
+    new_order[i], new_order[j] = new_order[j], new_order[i]
+    return new_order
+
+
+def _reorder_stocks(stocks: List[dict], order: List[str]) -> List[dict]:
+    """按 order(code 列表)重排 stocks; 不在 order 中的 code 保持原相对序追加于末尾。
+
+    纯函数: 不原地修改入参, 返回新列表。供 rewrite_stocks_toml 的 reorder 参数使用,
+    便于无头单测。
+    """
+    by_code: Dict[str, dict] = {}
+    for s in stocks:
+        by_code.setdefault(s.get("code"), s)
+    ordered = [by_code[c] for c in order if c in by_code]
+    seen = {id(s) for s in ordered}
+    rest = [s for s in stocks if id(s) not in seen]
+    return ordered + rest
 
 
 # ================= ⑦ 引擎: CSV 落盘 / 回看 / 统计 =================
@@ -1454,10 +1500,15 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
                       font=style["FONT_SM"], anchor="w")
     htitle.pack(side="left", padx=(3, 0))
 
+    def _quit():
+        """静默直接退出, 不弹任何确认框。"""
+        root.destroy()
+    root.protocol("WM_DELETE_WINDOW", _quit)
+
     close_btn = tk.Label(header, text=" × ", bg=style["header"], fg=style["fg_dim"],
                          font=style["FONT_SM"], cursor="hand2")
     close_btn.pack(side="right", padx=(0, 3))
-    close_btn.bind("<Button-1>", lambda e: root.destroy())
+    close_btn.bind("<Button-1>", lambda e: _quit())
 
     # 频率控件(1/3/5s 循环)
     freq_btn = tk.Label(header, text=f" {refresh_sec}s ", bg=style["header"], fg=style["fg_dim"],
@@ -1510,7 +1561,9 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     sig_frames: Dict[str, "tk.Frame"] = {}
     row_vis: Dict[str, bool] = {}
     last_sig_change: Dict[str, float] = {}
-    ui = {"filter_on": False, "show_sparkline": bool(settings.get("show_sparkline", True))}
+    # 手动排序: 记录每行行情行右侧的上移/下移箭头部件, 用于边界灰显
+    move_btns: Dict[str, tuple] = {}
+    ui = {"filter_on": bool(settings.get("filter_on", True)), "show_sparkline": bool(settings.get("show_sparkline", False))}
     QUOTE_PACK = dict(fill="x", padx=3, pady=1)
     SIG_PACK = dict(fill="x", padx=5, pady=(0, 1))
 
@@ -1539,12 +1592,89 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
                            font=style["FONT_SM"], cursor="hand2")
         del_btn.bind("<Button-1>", lambda e, c=code: _confirm_remove(c))
         del_btn.pack(side="right", padx=(0, 2))
+        # 手动排序: 上移/下移箭头(位于删除按钮左侧, 紧贴其左)
+        up_btn = tk.Label(f, text=" ▲ ", bg=style["bg"], fg=style["fg_dim"],
+                          font=style["FONT_SM"], cursor="hand2")
+        up_btn.pack(side="right", padx=(0, 1))
+        up_btn.bind("<Button-1>", lambda e, c=code: _move_stock(c, "up"))
+        down_btn = tk.Label(f, text=" ▼ ", bg=style["bg"], fg=style["fg_dim"],
+                            font=style["FONT_SM"], cursor="hand2")
+        down_btn.pack(side="right", padx=(0, 1))
+        down_btn.bind("<Button-1>", lambda e, c=code: _move_stock(c, "down"))
+        move_btns[code] = (up_btn, down_btn)
         spark.pack(side="right", padx=(2, 0))
         rows[code] = (sig_l, name_l, price_l, chg_l, dl_l, spark)
         quote_frames[code] = f
         row_vis[code] = True
         # 右键菜单: 删除该自选(功能①)——保留, 非 macOS 用户仍可用
         f.bind("<Button-3>", lambda e, c=code: _show_remove_menu(e, c))
+
+    def _refresh_move_buttons():
+        """刷新上移/下移箭头灰显: 首行 up_btn / 末行 down_btn 置为禁用色(与背景同色)。
+
+        纯 UI 态同步, 不触碰内存顺序与文件; 每轮手动排序或构建完成后调用一次即可。
+        """
+        order = [s["code"] for s in stocks]
+        n = len(order)
+        for i, c in enumerate(order):
+            btns = move_btns.get(c)
+            if not btns:
+                continue
+            up_btn, down_btn = btns
+            up_btn.config(fg=(style["bg"] if i == 0 else style["fg_dim"]))
+            down_btn.config(fg=(style["bg"] if i == n - 1 else style["fg_dim"]))
+
+    def _move_stock(code, direction):
+        """上移/下移一只股票(自定义手动排序)。
+
+        流程: 边界检查 -> 纯函数 move_stock_in_order 计算新顺序 -> 重建内存 stocks
+        -> 按新顺序重排 UI 显示(pack 追加到父容器末尾) -> 协调过滤可见性
+        -> 刷新箭头灰显 -> 回写 stocks.toml(reorder)。仅内存模式(stocks_path 为空)则跳过写回。
+        """
+        # 边界: code 不存在直接返回
+        if not any(s["code"] == code for s in stocks):
+            return
+        idx = next(i for i, s in enumerate(stocks) if s["code"] == code)
+        n = len(stocks)
+        if direction == "up" and idx == 0:
+            return
+        if direction == "down" and idx == n - 1:
+            return
+        new_order = move_stock_in_order([s["code"] for s in stocks], code, direction)
+        # 顺序未变(理论上已在上一步拦截, 双保险)则不操作
+        if new_order == [s["code"] for s in stocks]:
+            return
+        # 按新顺序重建内存 stocks(保留各 dict 原对象; 原地修改以便所有闭包共享同一列表)
+        by_code = {s["code"]: s for s in stocks}
+        stocks[:] = [by_code[c] for c in new_order]
+        # 重排 UI 显示顺序: 先全部 pack_forget 再按 new_order 依次 pack(确定性重排,
+        # 规避 Tk 对已 pack 控件重复 pack 不改变顺序的坑)
+        for c in new_order:
+            qf = quote_frames.get(c)
+            if qf is not None:
+                qf.pack_forget()
+            sf_ = sig_frames.get(c)
+            if sf_ is not None:
+                sf_.pack_forget()
+        for c in new_order:
+            qf = quote_frames.get(c)
+            if qf is not None:
+                qf.pack(**QUOTE_PACK)
+            sf_ = sig_frames.get(c)
+            if sf_ is not None:
+                sf_.pack(**SIG_PACK)
+        # 上面的 pack 会让原本隐藏的 sig 行重新显示, 需按 row_vis 还原过滤可见性(无论过滤开/关)
+        for c in new_order:
+            _apply_visibility(c, row_vis.get(c, True))
+        root.update_idletasks()
+        # 更新箭头灰显(首行 up / 末行 down 禁用)
+        _refresh_move_buttons()
+        # 持久化: 把新顺序写回 stocks.toml
+        if stocks_path:
+            try:
+                rewrite_stocks_toml(stocks_path, reorder=new_order)
+            except Exception as e:
+                status.config(text=f"写入 stocks.toml 失败: {e}")
 
     def _build_sig_row(st):
         """构建一只股票的下方信号提示行; 存入 sig_rows/sig_frames。"""
@@ -1699,6 +1829,8 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
 
     for st in stocks:
         _build_quote_row(st)
+    # 初始同步上移/下移箭头灰显(首行 up / 末行 down 禁用)
+    _refresh_move_buttons()
 
     # ---- 分隔线 + 下半部分: 信号提示 ----
     sep = tk.Frame(root, bg=style["sep"], height=1)

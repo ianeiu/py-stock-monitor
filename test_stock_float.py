@@ -997,15 +997,15 @@ resistance = [20.5]
 # ----------------------------------------------------------------------------
 # 16. P2 补充: 迷你 sparkline 显示/隐藏界面开关(功能③)
 #     GUI 按钮/显隐只做代码审查, 标注「需真机验证」, 不实例化 Tk。
-#     配置键 show_sparkline 走 settings.get(..., True), 默认开。
+#     配置键 show_sparkline 走 settings.get(..., False), 默认关(启动隐藏)。
 # ----------------------------------------------------------------------------
 class TestSparklineToggle(unittest.TestCase):
-    def test_show_sparkline_default_true(self):
-        # 未配置该键时, settings.get("show_sparkline", True) 应默认 True(保持现有行为)
+    def test_show_sparkline_default_false(self):
+        # 未配置该键时, settings.get("show_sparkline", False) 应默认 False(启动隐藏)
         fixture = {"settings": {"refresh_sec": 3}, "stocks": [{"code": "hk01810"}]}
         with mock.patch.object(sf, "_load_first", return_value=("fake", fixture)):
             s = sf.load_settings()
-        self.assertTrue(s.get("show_sparkline", True))
+        self.assertFalse(s.get("show_sparkline", False))
 
     def test_show_sparkline_read_from_config(self):
         # config.toml 含 show_sparkline = false -> 经 load_settings 后为 False
@@ -1414,6 +1414,66 @@ class TestRefreshBanWarning(unittest.TestCase):
         result = sf.refresh_requires_ban_warning(10)
         self.assertIs(False, result)
         self.assertFalse(result)
+
+
+class TestMoveStockInOrder(unittest.TestCase):
+    """手动排序纯函数 move_stock_in_order / _reorder_stocks 的无头单测(不依赖 Tk)。"""
+
+    def test_middle_up(self):
+        """中间元素上移一步正确。"""
+        order = ["a", "b", "c", "d"]
+        self.assertEqual(sf.move_stock_in_order(order, "b", "up"), ["b", "a", "c", "d"])
+
+    def test_middle_down(self):
+        """中间元素下移一步正确。"""
+        order = ["a", "b", "c", "d"]
+        self.assertEqual(sf.move_stock_in_order(order, "b", "down"), ["a", "c", "b", "d"])
+
+    def test_first_up_noop(self):
+        """首元素上移 -> 不变(返回副本, 不原地修改)。"""
+        order = ["a", "b", "c"]
+        result = sf.move_stock_in_order(order, "a", "up")
+        self.assertEqual(result, ["a", "b", "c"])
+        self.assertIsNot(result, order)
+
+    def test_last_down_noop(self):
+        """末元素下移 -> 不变。"""
+        order = ["a", "b", "c"]
+        result = sf.move_stock_in_order(order, "c", "down")
+        self.assertEqual(result, ["a", "b", "c"])
+
+    def test_unknown_code_noop(self):
+        """不存在的 code -> 不变。"""
+        order = ["a", "b", "c"]
+        result = sf.move_stock_in_order(order, "z", "up")
+        self.assertEqual(result, ["a", "b", "c"])
+        self.assertIsNot(result, order)
+
+    def test_invalid_direction_noop(self):
+        """非法 direction -> 不变。"""
+        order = ["a", "b", "c"]
+        self.assertEqual(sf.move_stock_in_order(order, "b", "left"), ["a", "b", "c"])
+
+    def test_full_order_integrity(self):
+        """多元素顺序整体正确: 末元素上移后落到倒数第二, 元素集合不变。"""
+        order = ["a", "b", "c", "d", "e"]
+        result = sf.move_stock_in_order(order, "e", "up")
+        self.assertEqual(result, ["a", "b", "c", "e", "d"])
+        self.assertEqual(sorted(result), sorted(order))
+
+    def test_reorder_stocks_keeps_extra(self):
+        """reorder 中遗漏的 code 保持原相对序追加于末尾。"""
+        stocks = [{"code": "a"}, {"code": "b"}, {"code": "c"}, {"code": "d"}]
+        result = sf._reorder_stocks(stocks, ["c", "a"])
+        self.assertEqual([s["code"] for s in result], ["c", "a", "b", "d"])
+
+    def test_reorder_stocks_preserves_objects(self):
+        """reorder 后仍是原 dict 对象(引用不变)。"""
+        a = {"code": "a"}
+        stocks = [a, {"code": "b"}]
+        result = sf._reorder_stocks(stocks, ["b", "a"])
+        self.assertEqual([s["code"] for s in result], ["b", "a"])
+        self.assertIs(result[1], a)
 
 
 if __name__ == "__main__":
