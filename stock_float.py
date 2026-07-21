@@ -6,7 +6,7 @@
 - 数据: 腾讯财经实时行情(qt.gtimg.cn) + 历史日K(ifzq.gtimg.cn); 备用免费源(新浪/东财)兜底
 - 指标: MA5/10/20, RSI(14), MACD(12,26,9); 可扩展 KDJ / 布林 / 量; 盘中把实时价并入指标序列(可关)
 - 信号: 多空打分 -> 五档信号(带滞回, 吸收边界抖动); 打分指标由 settings.indicators 动态决定(默认 MA/RSI/MACD)
-- 界面: 原生 tkinter 无边框 + 置顶 + 半透明; 上半部分行情(含 sparkline), 下半部分信号提示; 支持暂停/频率切换/暗色
+- 界面: 原生 tkinter 无边框 + 置顶 + 半透明; 上半部分行情, 下半部分信号提示; 支持暂停/频率切换/暗色
 - 通知: 省流规则(信号变动/阈值破位/支撑压力穿越)时弹系统通知(可配声音, 带冷却); 跨平台分发(mac AppleScript / linux notify-send / win 蜂鸣+闪烁)
 - 落盘: 同规则写 signals CSV(可按天滚动; 可关闭; 可按 csv_dedup_sec 去重); 支持 --stats 聚合与 --review 过滤
 - 日K按 代码+日期 缓存(30min), 实时行情并发拉取
@@ -695,7 +695,7 @@ def monitor(stock: dict, prev_sig: Optional[str] = None, rt: Optional[RT] = None
     """算单只股票的指标/信号; 返回 (text, sig, rec)。rt 为预取实时行情元组(可选)。
 
     settings["indicators"] 控制参与打分的指标(默认 ["MA","RSI","MACD"], 与改造前权重逐字一致);
-    rec 新增 k/d/j/boll_*/volume/vol_ma5 字段(追加到 CSV 尾部), 以及仅运行时的 kline(sparkline 用)。
+    rec 新增 k/d/j/boll_*/volume/vol_ma5 字段(追加到 CSV 尾部)。
     """
     code = stock["code"]
     name = stock["name"]
@@ -809,8 +809,6 @@ def monitor(stock: dict, prev_sig: Optional[str] = None, rt: Optional[RT] = None
         "boll_low": round(vals["boll_low"], 3) if vals.get("boll_low") is not None else "",
         "volume": round(vals["vol"], 0) if vals.get("vol") is not None else "",
         "vol_ma5": round(vals["vol_ma5"], 0) if vals.get("vol_ma5") is not None else "",
-        # 仅运行时, 不入 CSV(供 sparkline)
-        "kline": (list(closes[-30:]) + [price]) if closes else [price],
     }
     return text, sig, rec
 
@@ -887,8 +885,7 @@ def load_settings() -> dict:
 def set_topmost(root, on: bool) -> None:
     """设置窗口是否置顶(always-on-top)。薄封装 root.attributes, 便于无头桩测试。
 
-    约定: 置顶为运行时态(启动从 config 读默认, 运行中切换, 不回写文件),
-    与 filter_on / show_sparkline 保持一致。
+    约定: 置顶为运行时态(启动从 config 读默认, 运行中切换, 不回写文件)。
     """
     root.attributes("-topmost", bool(on))
 
@@ -941,17 +938,15 @@ def parse_add_input(s: str) -> dict:
     return {"code": code, "name": name}
 
 
-def is_row_visible(filter_on: bool, sig_changed_at: Optional[float],
+def is_row_visible(sig_changed_at: Optional[float],
                    window_sec: float = SIG_CHANGE_WINDOW_SEC) -> bool:
-    """功能② 信号行(下半)可见性判定纯函数。
+    """信号行(下半)可见性判定纯函数。
 
-    - filter_on=False: 信号行(下半)永远可见。
-    - filter_on=True 且 sig_changed_at 为 None: 信号行(下半)不可见。
-    - filter_on=True 且 sig_changed_at 非 None: (now - sig_changed_at) <= window_sec 信号行(下半)可见, 否则不可见。
+    默认只展示有信号变动的股票:
+    - sig_changed_at 为 None: 信号行(下半)不可见。
+    - sig_changed_at 非 None: (now - sig_changed_at) <= window_sec 信号行(下半)可见, 否则不可见。
     注意: 行情行(上半)始终可见, 不受本判定影响。
     """
-    if not filter_on:
-        return True
     if sig_changed_at is None:
         return False
     return (time.time() - sig_changed_at) <= window_sec
@@ -1392,57 +1387,6 @@ def build_style(settings: dict) -> dict:
 
 
 # ================= ⑩ GUI (Hud / run_hud) =================
-def _draw_sparkline(canvas: "tk.Canvas", kline: List[float], price: Any,
-                    prev_close: Any, style: dict) -> None:
-    """在 Canvas 上画折线(sparkline); 用 rec.kline(日K近30根+实时价), 不在 refresh 内联网。"""
-    try:
-        w = canvas.winfo_width() or 38
-        h = canvas.winfo_height() or 14
-        canvas.delete("all")
-        vals = [v for v in kline if isinstance(v, (int, float))]
-        if len(vals) < 2:
-            return
-        lo, hi = min(vals), max(vals)
-        rng = hi - lo
-        if rng <= 0:
-            rng = 1.0
-        pad = 1
-        n = len(vals)
-        col = style["up"] if (isinstance(price, (int, float)) and price >= (prev_close or price)) else style["down"]
-        coords: List[float] = []
-        for i, v in enumerate(vals):
-            x = pad + i * (w - 2 * pad) / (n - 1)
-            y = h - pad - (v - lo) / rng * (h - 2 * pad)
-            coords.append(x)
-            coords.append(y)
-        canvas.create_line(*coords, fill=col, width=1)
-    except Exception:
-        pass
-
-
-# sparkline 默认展开宽度(像素); 隐藏时折叠到 0 宽度(不依赖 pack_forget, 杜绝第二次隐藏失效)
-SPARK_W = 38
-
-
-def apply_sparkline_state(spark: "tk.Canvas", on: bool,
-                          snap: Optional[dict], style: dict) -> None:
-    """按开关显示/隐藏单只 sparkline; 幂等、可重入、健壮。
-
-    采用「清空白板 + 折叠宽度」而非 pack_forget/re-pack:
-      - on:  恢复宽度(SPARK_W)并按快照重绘(若快照含 kline); 刷新循环会持续重绘。
-      - off: 先清空已有折线(delete), 再把宽度折叠到 0 —— 几何上收起且关→开→关→开序列稳定。
-
-    该纯函数不依赖 Tk 主线程, 可直接无头单测(用桩对象记录 config/delete 调用)。
-    """
-    if on:
-        spark.config(width=SPARK_W)
-        if isinstance(snap, dict) and snap.get("kline"):
-            _draw_sparkline(spark, snap["kline"], snap.get("price"),
-                            snap.get("prev_close"), style)
-    else:
-        # 先清空折线, 再折叠宽度 -> 稳定隐藏(避免 pack_forget/re-pack 脆弱切换)
-        spark.delete("all")
-        spark.config(width=0)
 
 
 def apply_sig_visibility(sf_, visible, sig_pack):
@@ -1478,7 +1422,7 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             notifier: Optional[Notifier] = None, cooldown: float = 0.0,
             stocks_path: Optional[str] = None) -> None:
     """构建并运行浮窗; 后台线程按 refresh_sec 取数, 满足省流规则时写CSV/弹通知。
-    新增: 暂停/频率控件、每行 sparkline、暗色样式、Windows 闪烁(flash_fn 注入 notifier)。
+    新增: 暂停/频率控件、暗色样式、Windows 闪烁(flash_fn 注入 notifier)。
     """
     style = build_style(settings)
     # 涨跌幅颜色(浮窗专用)
@@ -1537,18 +1481,6 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     add_btn.pack(side="right", padx=(0, 2))
     add_btn.bind("<Button-1>", lambda e: _add_stock_dialog())
 
-    # 只看信号变动股过滤开关: 🔎 按钮(功能②)
-    filter_btn = tk.Label(header, text=" 🔍 ", bg=style["header"], fg=style["fg_dim"],
-                          font=style["FONT_SM"], cursor="hand2")
-    filter_btn.pack(side="right", padx=(0, 2))
-    filter_btn.bind("<Button-1>", lambda e: _toggle_filter())
-
-    # 迷你 sparkline 走势图显示/隐藏开关: 📈 按钮(功能③)
-    spark_btn = tk.Label(header, text=" 📈 ", bg=style["header"], fg=style["fg_dim"],
-                         font=style["FONT_SM"], cursor="hand2")
-    spark_btn.pack(side="right", padx=(0, 2))
-    spark_btn.bind("<Button-1>", lambda e: _toggle_sparkline())
-
     # 窗口置顶开关: 📌 按钮(功能④)
     # 注意: 此处 ui 字典尚未定义(L1566 之后), 故直接读 settings 默认(与 ui["topmost"] 同源)
     _top_on = bool(settings.get("topmost", True))
@@ -1571,7 +1503,7 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         w.bind("<ButtonPress-1>", start_drag)
         w.bind("<B1-Motion>", do_drag)
 
-    # ---- 行情行(含 sparkline) ----
+    # ---- 行情行 ----
     body = tk.Frame(root, bg=style["bg"])
     body.pack(fill="x")
     rows: Dict[str, tuple] = {}
@@ -1581,17 +1513,15 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     last_sig_change: Dict[str, float] = {}
     # 手动排序: 记录每行行情行右侧的上移/下移箭头部件, 用于边界灰显
     move_btns: Dict[str, tuple] = {}
-    ui = {"filter_on": bool(settings.get("filter_on", True)),
-          "show_sparkline": bool(settings.get("show_sparkline", False)),
-          "topmost": bool(settings.get("topmost", True))}
+    ui = {"topmost": bool(settings.get("topmost", True))}
     QUOTE_PACK = dict(fill="x", padx=3, pady=1)
     SIG_PACK = dict(fill="x", padx=5, pady=(0, 1))
 
-    # ---- 运行时增删自选 / 信号变动过滤: 行构建与 UI 回调(功能①②) ----
-    # 以下嵌套函数引用的 body/sigpane/status/filter_btn 等均在 run_hud 后续创建,
+    # ---- 运行时增删自选 / 信号行可见性控制: 行构建与 UI 回调 ----
+    # 以下嵌套函数引用的 body/sigpane/status 等均在 run_hud 后续创建,
     # 调用发生在运行时(构建循环或用户交互), 闭包按调用时解析, 故此处定义安全。
     def _build_quote_row(st):
-        """构建一只股票的行情行(含 sparkline); 存入 rows/quote_frames/row_vis, 绑定右键删除菜单。"""
+        """构建一只股票的行情行; 存入 rows/quote_frames/row_vis, 绑定右键删除菜单。"""
         code = st["code"]
         f = tk.Frame(body, bg=style["bg"], height=style["ROW_H"])
         f.pack(**QUOTE_PACK)
@@ -1605,9 +1535,7 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         chg_l.pack(side="left")
         dl_l = tk.Label(f, text="", bg=style["bg"], fg=style["dl"], font=style["FONT_SM"], width=3, anchor="w")
         dl_l.pack(side="left")
-        spark = tk.Canvas(f, width=38, height=14, bg=style["bg"], highlightthickness=0)
-        # 可见删除按钮(功能①): 先 pack 故位于最右角, 独立于 sparkline,
-        # spark 折叠(width=0)时也不受影响; 左键直接删除。
+        # 可见删除按钮(功能①): 先 pack 故位于最右角; 左键直接删除。
         del_btn = tk.Label(f, text=" 🗑 ", bg=style["bg"], fg=style["fg_dim"],
                            font=style["FONT_SM"], cursor="hand2")
         del_btn.bind("<Button-1>", lambda e, c=code: _confirm_remove(c))
@@ -1622,8 +1550,7 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         down_btn.pack(side="right", padx=(0, 1))
         down_btn.bind("<Button-1>", lambda e, c=code: _move_stock(c, "down"))
         move_btns[code] = (up_btn, down_btn)
-        spark.pack(side="right", padx=(2, 0))
-        rows[code] = (sig_l, name_l, price_l, chg_l, dl_l, spark)
+        rows[code] = (sig_l, name_l, price_l, chg_l, dl_l)
         quote_frames[code] = f
         row_vis[code] = True
         # 右键菜单: 删除该自选(功能①)——保留, 非 macOS 用户仍可用
@@ -1718,7 +1645,7 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         """功能②: 仅控制信号行(下半)显隐; 行情行(上半)始终可见, 不受过滤影响。
 
         委托模块级纯函数 apply_sig_visibility 操作 pack, 仅在真实状态变化时生效,
-        操作后刷新几何, 杜绝 pack_forget/re-pack 来回切换的脆弱性(与 sparkline 稳健思路一致)。
+        操作后刷新几何, 杜绝 pack_forget/re-pack 来回切换的脆弱性。
         """
         # 行情行(上半)始终可见: 构建时一次性 pack, 仅 _remove_stock 删除时才销毁,
         # 本函数不再对上半行情行做任何 pack/pack_forget。
@@ -1726,7 +1653,7 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         apply_sig_visibility(sf_, visible, SIG_PACK)
         # 刷新几何: 确保 pack_forget 立即生效, 不被后续 pack 覆盖而「粘住」。
         # 刷新循环已用 row_vis != visible 守卫, 仅在真实状态变化时才调用本函数,
-        # 故高频刷新不会每次 flush; _toggle_filter 遍历各调一次, 开销可接受。
+        # 切换类操作已移除, 刷新循环仅在可见性真实变化时调用 _apply_visibility, 开销可接受。
         root.update_idletasks()
 
     def _show_remove_menu(event, code):
@@ -1737,40 +1664,6 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             menu.tk_popup(event.x_root, event.y_root)
         finally:
             menu.grab_release()
-
-    def _toggle_filter():
-        """切换『只看信号变动股』过滤(功能②)。"""
-        ui["filter_on"] = not ui["filter_on"]
-        on = ui["filter_on"]
-        filter_btn.config(text="🔎" if on else "🔍",
-                          fg=(style["fg"] if on else style["fg_dim"]))
-        status.config(text=("🔎 只看信号变动股" if on else "● 实时"))
-        # 立即重算所有行可见性
-        with lock:
-            sig_changes = dict(last_sig_change)
-        for st in stocks:
-            c = st["code"]
-            vis = is_row_visible(on, sig_changes.get(c), SIG_CHANGE_WINDOW_SEC)
-            _apply_visibility(c, vis)
-            row_vis[c] = vis
-
-    def _apply_sparkline(on):
-        """按开关应用 sparkline 显示/隐藏(功能③, 主线程执行)。"""
-        spark_btn.config(text="📈" if on else "📉",
-                         fg=(style["fg"] if on else style["fg_dim"]))
-        status.config(text=("📈 走势图开" if on else "📉 走势图关"))
-        with lock:
-            snap = dict(data)
-        for st in stocks:
-            code = st["code"]
-            spark = rows[code][5]
-            # 幂等、可重入的显示/隐藏(折叠宽度而非 pack_forget, 杜绝第二次隐藏失效)
-            apply_sparkline_state(spark, on, snap.get(code), style)
-
-    def _toggle_sparkline():
-        """切换迷你 sparkline 走势图显示(功能③); root.after(0) 回主线程执行 UI 操作。"""
-        ui["show_sparkline"] = not ui["show_sparkline"]
-        root.after(0, _apply_sparkline, ui["show_sparkline"])
 
     def _toggle_topmost():
         """切换窗口置顶(always-on-top)(功能④)。用户点击 header 按钮, 本就在主线程, 直接同步调用。"""
@@ -1878,7 +1771,7 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     status = tk.Label(root, text="连接中…", bg=style["bg"], fg=style["fg_dim"], font=style["FONT_SM"], anchor="w")
     status.pack(fill="x", padx=3, pady=(0, 1))
 
-    # 初始定位到右上角(为 sparkline 留出更多空间)
+    # 初始定位到右上角
     root.update_idletasks()
     sw = root.winfo_screenwidth()
     root.geometry(f"+{max(0, sw - 205)}+20")
@@ -2049,16 +1942,15 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             snap = dict(data)
             sig_changes = dict(last_sig_change)
         offline = not snap
-        filter_on = ui["filter_on"]
         for st in stocks:
             code = st["code"]
-            # 功能②: 过滤模式下按信号变动时间戳隐藏/显示信号行(下半); 行情行始终可见(仅在状态变化时操作 pack, 避免抖动)
-            visible = is_row_visible(filter_on, sig_changes.get(code), SIG_CHANGE_WINDOW_SEC)
+            # 信号行(下半)默认只展示有信号变动的股票; 行情行始终可见(仅在状态变化时操作 pack, 避免抖动)
+            visible = is_row_visible(sig_changes.get(code), SIG_CHANGE_WINDOW_SEC)
             if row_vis.get(code, True) != visible:
                 _apply_visibility(code, visible)
                 row_vis[code] = visible
             r = snap.get(code)
-            sig_l, name_l, price_l, chg_l, dl_l, spark = rows[code]
+            sig_l, name_l, price_l, chg_l, dl_l = rows[code]
             if not r:
                 continue
             price = r.get("price")
@@ -2075,10 +1967,6 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             sig_l.config(text="●", fg=sig_colors.get(sig, style["flat"]))
             # 延时标记: 港股/美股免费源约15分钟延时, 标"延时"提醒数据非实时
             dl_l.config(text="延时" if delayed else "", fg=style["dl"])
-            # sparkline(功能③: 隐藏开关关闭时跳过绘制)
-            kline = r.get("kline")
-            if kline and ui["show_sparkline"]:
-                _draw_sparkline(spark, kline, price, r.get("prev_close"), style)
             # 下半部分: 信号提示
             sdot, slv, sbb = sig_rows[code]
             bull = r.get("bull")

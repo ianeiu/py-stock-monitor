@@ -22,7 +22,7 @@
 | 通知 | `Notifier` | `notify(msg)` 按平台分发 mac/linux/windows，Windows 走"蜂鸣+闪烁" | 替换现有仅 mac 的 `notify_mac` 直连 |
 | 指标 | `Indicator`（命名空间纯函数） | `sma/ema_series/rsi/macd` 保留；新增 `kdj/bollinger`；`indicators` 配置映射到计算 | 纯增量，默认关 |
 | 信号引擎 | `SignalEngine`（包住 `monitor`） | 打分从"写死"改"按 `indicators` 动态累加"，默认仅 MA/RSI/MACD 时与现有一致 | 核心改动 |
-| 界面 | `Hud`（包住 `run_hud`） | 无边框浮窗；sparkline Canvas、⏸ 暂停、频率控件、暗色样式、Windows 闪烁 | 增量控件 |
+| 界面 | `Hud`（包住 `run_hud`） | 无边框浮窗；⏸ 暂停、频率控件、暗色样式、Windows 闪烁 | 增量控件 |
 | 配置/落盘 | 现有函数扩展 | 新增 settings 键、stocks.toml `support/resistance`、CSV 去重/`--stats`/`--review` 过滤 | 增量 |
 
 **取舍理由**
@@ -199,7 +199,6 @@ def monitor(stock, prev_sig=None, rt=None, settings=None) -> Tuple[str,str,dict]
     rec = { ... 既有字段 ...,
             "k":..., "d":..., "j":..., "boll_mid":..., "boll_up":..., "boll_low":...,
             "volume": volume, "vol_ma5": vals.get("vol_ma5",""),
-            "kline": list(closes[-30:]),   # 供 sparkline; 不在 CSV_FIELDS 内
             "delayed": delayed, "ts": ts }
     return text, sig, rec
 ```
@@ -293,7 +292,7 @@ sequenceDiagram
         end
         W->>W: data.update(rec) [加锁], 记录 last_sigs(含 last_price)
     end
-    R->>R: 每250ms root.after 读 data 更新标签 + Canvas(sparkline 用 rec.kline)
+    R->>R: 每250ms root.after 读 data 更新标签
 ```
 
 **暂停/频率**：`worker` 读共享 `state={"paused":False,"refresh_sec":1}`；`paused` 为真则跳过 `fetch` 仅 `sleep(refresh_sec)`；⏸ 按钮与频率循环控件改 `state`。
@@ -315,14 +314,12 @@ sequenceDiagram
   4. 新增示例配置与 README。
   5. **验收**：`python3 stock_float.py` 行为与改造前逐字一致（默认 `indicators` 未配 → 走 MA/RSI/MACD）。
 
-### T02 — P0 交互三件套：sparkline + 暂停/频率 + 跨平台通知　`P0`
+### T02 — P0 交互三件套：暂停/频率 + 跨平台通知　`P0`
 - **源文件**：`stock_float.py`、`config.toml.example`、`README.md`
 - **依赖**：T01
 - **内容**：
   1. `Notifier` 跨平台分发：mac→`notify_mac`；linux→`notify-send`(subprocess)；win→`winsound.Beep` + `flash_fn`(GUI 注入，`root.after` 闪烁)。
   2. `run_hud` 加共享 `state{"paused","refresh_sec"}`；顶栏加 ⏸ 按钮（暂停/继续）与频率循环控件（1→3→5→1）；worker 按 `state` 跳过取数/调速。
-  3. 每行行情加 ~50px `tk.Canvas`；`refresh` 用 `rec["kline"]`（日K近30根+实时价）画折线，色随 `price vs prev_close`。
-  4. `monitor` 把 `kline` 写入 `rec`（不在 CSV 字段内）。
 - **优先级**：P0（用户最易感知）
 
 ### T03 — P1 数据/信号引擎增强：多源兜底 + 指标扩展 + 支撑压力线　`P1`
@@ -356,7 +353,7 @@ sequenceDiagram
 ### 建议实现顺序
 **T01 → T02 → T03 → T04 → T05**
 - T01 必须先做（所有功能依赖抽象层）。
-- T02 为 P0，优先交付用户可感知的 sparkline/暂停/跨平台通知。
+- T02 为 P0，优先交付用户可感知的暂停/频率/跨平台通知。
 - T03 是数据/信号核心（决策 3 的一步到位），紧随其后。
 - T04、T05 相互独立，可并行或按团队产能排期。
 
@@ -386,7 +383,6 @@ csv / json / re / os / sys / time / threading / argparse / urllib.request
 ### 7.1 `rec` 字典字段约定
 - **既有字段（不变）**：`datetime, code, name, price, chg_pct, open, prev_close, ma5, ma10, ma20, rsi, macd_dif, macd_dea, macd_hist, bull, bear, net, signal, reasons, delayed, ts`（外加 `swing_pct`）。
 - **新增指标字段（追加到 `CSV_FIELDS` 尾部，向后兼容旧 CSV）**：`k, d, j, boll_mid, boll_up, boll_low, volume, vol_ma5`。
-- **仅运行时、不入 CSV 的字段**：`kline`（sparkline 用，近 30 根日K收盘）。
 - `reasons` 在 `append_signal` 中用 `;` 连接（既有约定保留）。
 
 ### 7.2 settings 键约定
@@ -403,9 +399,9 @@ csv / json / re / os / sys / time / threading / argparse / urllib.request
 
 ### 7.4 线程安全约定
 - `data`（code→rec）与 `last_sigs` 由 `lock = threading.Lock()` 保护；worker 写、refresh 读均加锁（既有约定，T02/T03 继承）。
-- **GUI 操作只能在主线程**：`refresh`/`root.after` 回调改标签与 Canvas；后台 worker 不得直接 `config`。
+- **GUI 操作只能在主线程**：`refresh`/`root.after` 回调改标签；后台 worker 不得直接 `config`。
 - Windows 蜂鸣在后台线程直接 `winsound.Beep`（阻塞 ~0.2s 可接受）；闪烁由 `flash_fn` 经 `root.after` 回主线程。
-- `get_kline` 有 30min 缓存，worker 调用安全；GUI 侧 sparkline 直接用 `rec["kline"]`，**不**在 refresh 内触发网络请求（避免卡 UI）。
+- `get_kline` 有 30min 缓存，worker 调用安全；`refresh` 内不触发网络请求（避免卡 UI）。
 
 ---
 

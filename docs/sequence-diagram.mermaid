@@ -48,6 +48,5 @@ sequenceDiagram
         R->>R: 加锁读 data 快照
         R->>R: 更新行情行标签(价/涨跌幅/延时/信号点)
         R->>R: 更新信号提示(档位/多空)
-        R->>R: Canvas 画 sparkline(rec.kline + 实时价)
         R->>Root: root.after(250, refresh)
     end

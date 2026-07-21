@@ -5,7 +5,7 @@
 约束:
 - 仅用 Python 标准库 (unittest), 零第三方依赖。
 - 本环境无 DISPLAY, 严禁实例化 Tk / 调用 run_hud/mainloop。
-  GUI 相关项(sparkline 绘制 / 暂停按钮 / 频率控件 / Windows 闪烁 / 暗色渲染)
+  GUI 相关项(暂停按钮 / 频率控件 / Windows 闪烁 / 暗色渲染)
   仅做逻辑层 / 纯函数验证, 并明确标注「需真机验证」。
 - 网络与 GUI 通过 unittest.mock 隔离。
 
@@ -754,7 +754,6 @@ class TestGuiReviewOnly(unittest.TestCase):
     """以下项因无 DISPLAY 无法无头实例化 Tk, 仅做代码层存在性与接口契约校验。
 
     需真机验证项:
-      - sparkline 绘制 (_draw_sparkline 在 Canvas 上画折线)
       - 暂停/继续按钮 (_toggle_pause 改 state["paused"])
       - 频率控件 (_cycle_freq 循环 1->3->5->10->1)
       - Windows 闪烁 (_flash_window 经 root.after 回主线程)
@@ -765,7 +764,7 @@ class TestGuiReviewOnly(unittest.TestCase):
         # 模块级符号存在且可调用 (具体行为需真机)
         # 注: _toggle_pause / _cycle_freq / _flash_window 是 run_hud 内部嵌套函数,
         #     仅能在本机建 Tk 后提取, 此处不实例化 Tk, 故只校验模块级导出符号。
-        for name in ("run_hud", "_draw_sparkline"):
+        for name in ("run_hud",):
             self.assertTrue(hasattr(sf, name), f"{name} 缺失")
             self.assertTrue(callable(getattr(sf, name)), f"{name} 不可调用")
 
@@ -983,36 +982,12 @@ resistance = [20.5]
 
     def test_is_row_visible(self):
         now = time.time()
-        # filter_off -> 永远可见
-        self.assertTrue(sf.is_row_visible(False, None))
-        self.assertTrue(sf.is_row_visible(False, now - 1000))
-        # filter_on + None -> 不可见
-        self.assertFalse(sf.is_row_visible(True, None))
-        # filter_on + 窗口内 -> 可见
-        self.assertTrue(sf.is_row_visible(True, now))
-        # filter_on + 超窗口 -> 不可见
-        self.assertFalse(sf.is_row_visible(True, now - 1000))
-
-
-# ----------------------------------------------------------------------------
-# 16. P2 补充: 迷你 sparkline 显示/隐藏界面开关(功能③)
-#     GUI 按钮/显隐只做代码审查, 标注「需真机验证」, 不实例化 Tk。
-#     配置键 show_sparkline 走 settings.get(..., False), 默认关(启动隐藏)。
-# ----------------------------------------------------------------------------
-class TestSparklineToggle(unittest.TestCase):
-    def test_show_sparkline_default_false(self):
-        # 未配置该键时, settings.get("show_sparkline", False) 应默认 False(启动隐藏)
-        fixture = {"settings": {"refresh_sec": 3}, "stocks": [{"code": "hk01810"}]}
-        with mock.patch.object(sf, "_load_first", return_value=("fake", fixture)):
-            s = sf.load_settings()
-        self.assertFalse(s.get("show_sparkline", False))
-
-    def test_show_sparkline_read_from_config(self):
-        # config.toml 含 show_sparkline = false -> 经 load_settings 后为 False
-        fixture = {"settings": {"show_sparkline": False}, "stocks": [{"code": "hk01810"}]}
-        with mock.patch.object(sf, "_load_first", return_value=("fake", fixture)):
-            s = sf.load_settings()
-        self.assertFalse(s.get("show_sparkline"))
+        # 信号行(下半)默认只展示有信号变动的股票: 无变动时间戳 -> 不可见
+        self.assertFalse(sf.is_row_visible(None))
+        # 窗口内变动 -> 可见
+        self.assertTrue(sf.is_row_visible(now))
+        # 超窗口 -> 不可见
+        self.assertFalse(sf.is_row_visible(now - 1000))
 
 
 # ----------------------------------------------------------------------------
@@ -1170,88 +1145,6 @@ class TestGrayness(unittest.TestCase):
                              f"dark {key} 在 grayness=1.0 被错误去饱和")
 
 
-# ----------------------------------------------------------------------------
-# 17. 修复回归: sparkline 显示/隐藏状态机(功能③) —— 杜绝「第二次隐藏失效」
-#     抽成纯函数 apply_sparkline_state, 用桩对象无头验证「关→开→关→开」幂等。
-# ----------------------------------------------------------------------------
-class _StubSpark:
-    """模拟 tk.Canvas 的最小桩: 记录 config/delete/create_line 调用, 维护 _width。"""
-    def __init__(self, width=None):
-        self._width = sf.SPARK_W if width is None else width
-        self.calls = []
-
-    def config(self, **kw):
-        if "width" in kw:
-            self._width = kw["width"]
-        self.calls.append(("config", dict(kw)))
-
-    def delete(self, *args):
-        self.calls.append(("delete", args))
-
-    def create_line(self, *args, **kw):
-        self.calls.append(("create_line", args))
-
-    def winfo_width(self):
-        return self._width
-
-    def winfo_height(self):
-        return 14
-
-
-class TestApplySparklineState(unittest.TestCase):
-    """守「关→开→关→开」每个阶段 spark 折叠/展开状态, 且可重入/idempotent。"""
-
-    def _style(self):
-        return {"up": "#ff6b5e", "down": "#4cc38a"}
-
-    def _snap(self):
-        return {"kline": [1.0, 2.0, 3.0, 2.5], "price": 2.5, "prev_close": 1.0}
-
-    def test_toggle_off_on_off_on(self):
-        # 核心回归: 第二次(及任意次)隐藏都必须生效(_width==0)
-        spark = _StubSpark()
-        # 初始展开(构建时 width=SPARK_W)
-        sf.apply_sparkline_state(spark, False, None, self._style())   # 隐藏
-        self.assertEqual(spark._width, 0)
-        sf.apply_sparkline_state(spark, True, self._snap(), self._style())  # 显示
-        self.assertEqual(spark._width, sf.SPARK_W)
-        sf.apply_sparkline_state(spark, False, None, self._style())   # 再次隐藏(修复点)
-        self.assertEqual(spark._width, 0)
-        sf.apply_sparkline_state(spark, True, self._snap(), self._style())   # 再次显示
-        self.assertEqual(spark._width, sf.SPARK_W)
-
-    def test_idempotent(self):
-        # 连续两次同状态不漂移
-        spark = _StubSpark()
-        sf.apply_sparkline_state(spark, False, None, self._style())
-        sf.apply_sparkline_state(spark, False, None, self._style())
-        self.assertEqual(spark._width, 0)
-        sf.apply_sparkline_state(spark, True, self._snap(), self._style())
-        sf.apply_sparkline_state(spark, True, self._snap(), self._style())
-        self.assertEqual(spark._width, sf.SPARK_W)
-
-    def test_off_clears_canvas(self):
-        # 隐藏时必须清空已有折线(delete), 避免残留上一张图
-        spark = _StubSpark()
-        sf.apply_sparkline_state(spark, False, None, self._style())
-        self.assertTrue(any(c[0] == "delete" for c in spark.calls),
-                        "隐藏时必须清空画布(delete)")
-
-    def test_on_with_kline_redraws(self):
-        # 显示且有 kline 时立即重绘(触发 create_line)
-        spark = _StubSpark()
-        sf.apply_sparkline_state(spark, True, self._snap(), self._style())
-        self.assertEqual(spark._width, sf.SPARK_W)
-        self.assertTrue(any(c[0] == "create_line" for c in spark.calls),
-                        "显示且有 kline 时应重绘折线")
-
-    def test_on_without_kline_no_draw(self):
-        # 显示但无 kline 时不绘制, 仅恢复宽度
-        spark = _StubSpark()
-        sf.apply_sparkline_state(spark, True, {"kline": None}, self._style())
-        self.assertEqual(spark._width, sf.SPARK_W)
-        self.assertFalse(any(c[0] == "create_line" for c in spark.calls),
-                        "无 kline 时不应绘制折线")
 
 
 # ----------------------------------------------------------------------------

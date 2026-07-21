@@ -26,10 +26,6 @@ float_theme = "light"
 # 字体族与字号(默认 Menlo / 7; 字号过小看不清, 过大占屏)
 float_font = "Menlo"
 float_font_size = 7
-# 仅变动提示(只看信号变动股)开关(默认开 true; 只看有信号变动的股票, 关则全部显示)
-filter_on = true
-# 迷你走势图(sparkline)开关(默认关 false; 想看走势点 📈 打开, 嫌占屏可保持 false)
-show_sparkline = false
 # 窗口是否始终置顶(默认 true; false 则取消置顶, 可被其它窗口遮挡)
 topmost = true
 # 界面颜色灰色程度(强调色去饱和) 0.0~1.0; 0=原色(红涨绿跌), 1=纯灰阶, 0.6=轻度去色
