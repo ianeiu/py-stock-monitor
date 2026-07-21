@@ -36,6 +36,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 from typing import Tuple, Optional, Callable, List, Dict, Any
+from pathlib import Path
 
 try:
     import tkinter as tk
@@ -882,6 +883,59 @@ def load_settings() -> dict:
     return merged
 
 
+def _save_config_key(key: str, value, path: str = None) -> None:
+    """向 config.toml 写入单个 [settings] 键值对（保留式）。用于设置面板实时持久化。
+
+    - path: 目标文件; 缺省遍历 SETTINGS_CANDIDATES 取第一个已存在者, 都不存在则静默跳过。
+    - float 值用 repr 落为合法 TOML 数值(如 0.94, 无引号); 其它值用 repr(str(value)) 落为字符串。
+    - 保留其它段与注释; 异常静默吞掉, 不阻塞 UI。
+    """
+    try:
+        target = path
+        if not target:
+            for c in SETTINGS_CANDIDATES:
+                if os.path.isfile(c):
+                    target = c
+                    break
+        if not target:
+            return
+        text = Path(target).read_text('utf-8', errors='replace')
+        # 确保 [settings] 段存在
+        if '[settings]' not in text:
+            text = '[settings]\n' + text
+        key_pat = re.compile(r'^\s*' + re.escape(key) + r'\s*=')
+        # float -> 裸数值(TOML 合法); 其余 -> 字符串 repr(带引号, 安全)
+        new_line = (f'{key} = {repr(value)}' if isinstance(value, float)
+                    else f'{key} = {repr(str(value))}')
+        lines = text.split('\n')
+        found = False
+        out: List[str] = []
+        in_settings = False
+        for line in lines:
+            stripped = line.strip()
+            if stripped == '[settings]':
+                in_settings = True
+                out.append(line)
+                continue
+            if stripped.startswith('[') and stripped != '[settings]':
+                in_settings = False
+            if in_settings and key_pat.match(line):
+                out.append(new_line)
+                found = True
+            else:
+                out.append(line)
+        if not found:
+            # 在 [settings] 后第一行插入
+            for i, line in enumerate(out):
+                if line.strip() == '[settings]':
+                    out.insert(i + 1, new_line)
+                    break
+        Path(target).write_text('\n'.join(out), 'utf-8')
+    except Exception:
+        # 异常静默吞掉, 不阻塞 UI
+        pass
+
+
 def set_topmost(root, on: bool) -> None:
     """设置窗口是否置顶(always-on-top)。薄封装 root.attributes, 便于无头桩测试。
 
@@ -1418,6 +1472,11 @@ def refresh_requires_ban_warning(nxt_sec: int) -> bool:
     return nxt_sec == 1
 
 
+def format_stock_name(name: str, delayed: bool) -> str:
+    """股票名显示: 延时源在名后追加（延时）提示。纯函数, 便于无头单测。"""
+    return f"{name}（延时）" if delayed else name
+
+
 def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict], None]] = None,
             notifier: Optional[Notifier] = None, cooldown: float = 0.0,
             stocks_path: Optional[str] = None) -> None:
@@ -1490,6 +1549,24 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     top_btn.pack(side="right", padx=(0, 2))
     top_btn.bind("<Button-1>", lambda e: _toggle_topmost())
 
+    # 信号提示显隐开关: 🔔/🔕 按钮(功能①, 运行时态, 不落盘; 默认显示)
+    sig_btn = tk.Label(header, text=" 🔔 ", bg=style["header"], fg=style["fg"],
+                       font=style["FONT_SM"], cursor="hand2")
+    sig_btn.pack(side="right", padx=(0, 2))
+    sig_btn.bind("<Button-1>", lambda e: _toggle_signal())
+
+    # 设置面板: ⚙️ 按钮(透明度+灰度), 点开实时调节并持久化
+    set_btn = tk.Label(header, text=" ⚙ ", bg=style["header"], fg=style["fg_dim"],
+                       font=style["FONT_SM"], cursor="hand2")
+    set_btn.pack(side="right", padx=(0, 2))
+    set_btn.bind("<Button-1>", lambda e: _open_settings_panel())
+
+    # 立即刷新: ↺ 按钮(点击触发后台立即取数)
+    refresh_btn = tk.Label(header, text=" ↺ ", bg=style["header"], fg=style["fg_dim"],
+                           font=style["FONT_SM"], cursor="hand2")
+    refresh_btn.pack(side="right", padx=(0, 2))
+    refresh_btn.bind("<Button-1>", lambda e: _force_refresh())
+
     drag = {"x": 0, "y": 0}
 
     def start_drag(e):
@@ -1513,7 +1590,7 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     last_sig_change: Dict[str, float] = {}
     # 手动排序: 记录每行行情行右侧的上移/下移箭头部件, 用于边界灰显
     move_btns: Dict[str, tuple] = {}
-    ui = {"topmost": bool(settings.get("topmost", True))}
+    ui = {"topmost": bool(settings.get("topmost", True)), "show_signal": True}
     QUOTE_PACK = dict(fill="x", padx=3, pady=1)
     SIG_PACK = dict(fill="x", padx=5, pady=(0, 1))
 
@@ -1527,7 +1604,7 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         f.pack(**QUOTE_PACK)
         sig_l = tk.Label(f, text="●", bg=style["bg"], fg=style["flat"], font=style["FONT"], width=2, anchor="w")
         sig_l.pack(side="left")
-        name_l = tk.Label(f, text=st["name"], bg=style["bg"], fg=style["fg"], font=style["FONT"], width=6, anchor="w")
+        name_l = tk.Label(f, text=st["name"], bg=style["bg"], fg=style["fg"], font=style["FONT"], width=14, anchor="w")
         name_l.pack(side="left")
         price_l = tk.Label(f, text="--", bg=style["bg"], fg=style["fg"], font=style["FONT"], width=5, anchor="e")
         price_l.pack(side="left", padx=(0, 4))
@@ -1782,12 +1859,18 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     lock = threading.Lock()
     # 共享状态(后台线程读/主线程写; 单键原子操作在 CPython 下安全)
     state = {"paused": False, "refresh_sec": refresh_sec}
+    refresh_event = threading.Event()   # ↺ 立即刷新信号
 
     def _toggle_pause():
         state["paused"] = not state["paused"]
         pause_btn.config(text=" ▶ " if state["paused"] else " ⏸ ")
         if state["paused"]:
             status.config(text="⏸ 已暂停")
+
+    def _force_refresh():
+        """↺ 立即触发一次后台取数(获取最新行情)。"""
+        refresh_event.set()
+        status.config(text="↺ 刷新中…")
 
     def _cycle_freq():
         cur = state["refresh_sec"]
@@ -1804,6 +1887,149 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
                 return  # 用户取消, 保持当前频率不变
         state["refresh_sec"] = nxt
         freq_btn.config(text=f" {nxt}s ")
+
+    # ---- 信号提示显隐开关(功能①: 运行时态, 不落盘) ----
+    def _toggle_signal():
+        """切换信号提示显隐(功能①)。关闭时整块隐藏(含标题/分隔线/容器); 开启时恢复。"""
+        ui["show_signal"] = not ui["show_signal"]
+        on = ui["show_signal"]
+        sig_btn.config(text=(" 🔔 " if on else " 🔕 "),
+                       fg=(style["fg"] if on else style["fg_dim"]))
+        # 整块显隐: 分隔线 / 信号标题 / 信号容器
+        # winfo_ismapped 守卫避免重复 pack; before=status 维持原始上下顺序(否则布局错乱)
+        if on:
+            if not sep.winfo_ismapped():
+                sep.pack(fill="x", padx=5, pady=2, before=status)
+            if not sighead.winfo_ismapped():
+                sighead.pack(fill="x", padx=5, pady=(0, 1), before=status)
+            if not sigpane.winfo_ismapped():
+                sigpane.pack(fill="x", before=status)
+        else:
+            if sep.winfo_ismapped():
+                sep.pack_forget()
+            if sighead.winfo_ismapped():
+                sighead.pack_forget()
+            if sigpane.winfo_ismapped():
+                sigpane.pack_forget()
+        # 各股票信号行按 show_signal + is_row_visible 联合判定
+        for st in stocks:
+            c = st["code"]
+            vis = on and is_row_visible(last_sig_change.get(c), SIG_CHANGE_WINDOW_SEC)
+            if row_vis.get(c, True) != vis:
+                _apply_visibility(c, vis)
+                row_vis[c] = vis
+        status.config(text=("🔔 信号提示开" if on else "🔕 信号提示关"))
+        root.update_idletasks()
+
+    # ---- 设置面板: 透明度 + 灰度(实时生效 + 持久化) ----
+    def _open_settings_panel():
+        """打开设置面板 Toplevel: 透明度滑块 + 灰度滑块, 实时生效 + 持久化。"""
+        if tk is None:
+            return
+        panel = tk.Toplevel(root)
+        panel.title("设置")
+        panel.transient(root)
+        panel.resizable(False, False)
+        panel.configure(bg=style["bg"])
+
+        # 定位在 root 附近(其下方)
+        x = root.winfo_x() + 10
+        y = root.winfo_y() + root.winfo_height() + 5
+        panel.geometry(f"+{x}+{y}")
+
+        def make_slider(label_text, from_, to_, default_val, resolution, on_change):
+            """创建一行: 标签 + 滑块 + 数值显示。"""
+            frm = tk.Frame(panel, bg=style["bg"])
+            frm.pack(fill="x", padx=12, pady=6)
+            lbl = tk.Label(frm, text=label_text, bg=style["bg"], fg=style["fg"],
+                          font=style["FONT_SM"], anchor="w", width=10)
+            lbl.pack(side="left")
+            var = tk.DoubleVar(value=default_val)
+            scl = tk.Scale(frm, from_=from_, to=to_, resolution=resolution,
+                          orient="horizontal", variable=var,
+                          bg=style["bg"], fg=style["fg"],
+                          highlightthickness=0, troughcolor=style["header"],
+                          length=180, command=lambda v, cb=on_change: cb(float(v)))
+            scl.pack(side="left", fill="x", expand=True, padx=(6, 0))
+            return var, scl
+
+        # --- 透明度 ---
+        cur_alpha = settings.get("float_alpha", ALPHA_DEFAULT)
+        alpha_var, _ = make_slider(
+            "透明度", 0.30, 1.0, float(cur_alpha), 0.01,
+            lambda val: _apply_alpha(val))
+        # --- 灰度 ---
+        cur_gray = max(0.0, min(1.0, float(settings.get("grayness") or 0.0)))
+        gray_var, _ = make_slider(
+            "灰度", 0.0, 1.0, cur_gray, 0.05,
+            lambda val: _apply_grayness(val))
+
+        # 关闭按钮
+        close = tk.Button(panel, text="完成", command=panel.destroy,
+                         bg=style["header"], fg=style["fg"],
+                         font=style["FONT_SM"], cursor="hand2",
+                         relief="flat", padx=16, pady=4)
+        close.pack(pady=(4, 8))
+
+    def _apply_alpha(val: float):
+        """实时应用透明度(alpha 边界 clamp 在 [0.30, 1.0])。"""
+        val = max(0.30, min(1.0, val))            # 安全边界
+        root.attributes("-alpha", val)
+        nonlocal alpha
+        alpha = val
+        settings["float_alpha"] = val
+        _save_config_key("float_alpha", val)
+
+    def _apply_grayness(val: float):
+        """实时应用灰度(重算 style 并全量重刷 widget 配色)。"""
+        val = max(0.0, min(1.0, val))
+        settings["grayness"] = val
+        nonlocal style
+        style = build_style(settings)             # 重算含新灰度的完整样式字典
+        _reapply_style()                          # 全量重刷配色
+        _save_config_key("grayness", val)
+
+    def _reapply_style():
+        """用当前 style 字典重刷所有可见 widget 配色(灰度变更后调用)。
+
+        涨跌幅 chg_l 不动(保留红涨绿跌语义), 交由下一轮刷新循环按新 up/down 自然更新;
+        中性文本/背景色与 header 按钮立即刷新。
+        """
+        nonlocal up_color, down_color, sig_colors
+        # 刷新随灰度变化的源色, 使下一轮刷新循环自动用新 up/down/信号色
+        up_color = style["up"]
+        down_color = style["down"]
+        sig_colors = style["sig_colors"]
+        root.configure(bg=style["bg"])
+        header.configure(bg=style["header"])
+        htitle.configure(bg=style["header"], fg=style["fg_dim"])
+        status.configure(bg=style["bg"], fg=style["fg_dim"])
+        sighead.configure(bg=style["bg"], fg=style["fg_dim"])
+        sep.configure(bg=style["sep"])
+        # 所有行情行背景 + 中性文本色(涨跌幅 chg_l 不动, 交由刷新循环更新)
+        for code, (sig_l, name_l, price_l, chg_l, dl_l) in rows.items():
+            parent = name_l.master
+            parent.configure(bg=style["bg"])
+            name_l.configure(fg=style["fg"])
+            price_l.configure(fg=style["fg"])
+            dl_l.configure(fg=style["dl"])
+            sig_l.configure(fg=style["flat"])                  # 左侧中性信号点随灰度
+        # 信号行
+        for code, (sdot, slv, sbb) in sig_rows.items():
+            parent = sdot.master
+            parent.configure(bg=style["bg"])
+            slv.configure(fg=style["fg_dim"])
+            sbb.configure(fg=style["fg_dim"])
+            # sdot 语义色保持 sig_colors(由刷新循环按信号着色, 此处不动)
+        # header 按钮(统一底色 + dim 高亮; 特殊高亮由各 toggle 自管)
+        for btn in (close_btn, freq_btn, pause_btn, add_btn, top_btn, sig_btn, set_btn):
+            btn.configure(bg=style["header"], fg=style["fg_dim"])
+        # 按钮特殊高亮恢复
+        if ui.get("topmost"):
+            top_btn.configure(fg=style["fg"])
+        if ui.get("show_signal"):
+            sig_btn.configure(fg=style["fg"])
+        root.update_idletasks()
 
     # ---- Windows 闪烁(经 root.after 回主线程, 由 notifier 注入) ----
     _flash = {"n": 0, "orig": alpha}
@@ -1829,9 +2055,16 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
 
     def worker():
         while True:
-            if state.get("paused"):
-                time.sleep(state.get("refresh_sec", 1))
-                continue
+            force = refresh_event.is_set()
+            if force:
+                refresh_event.clear()
+            if state.get("paused") and not force:
+                # 暂停态: 用 Event.wait 替代裸 sleep, 使 ↺ 能即时唤醒并强制取数一次
+                if refresh_event.wait(timeout=state.get("refresh_sec", 1)):
+                    refresh_event.clear()
+                    # 被 ↺ 唤醒: 不 continue, 落到下方立即取数一次(暂停态保持)
+                else:
+                    continue
             # 运行时增删: 每轮快照 stocks, 支持新增/删除自选(功能①)
             cur_stocks = list(stocks)
             codes = [s["code"] for s in cur_stocks]
@@ -1935,7 +2168,8 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
                 }
             with lock:
                 data.update(new)
-            time.sleep(state.get("refresh_sec", 1))
+            if refresh_event.wait(timeout=state.get("refresh_sec", 1)):
+                refresh_event.clear()  # ↺ 触发, 立即进入下一轮取数
 
     def refresh():
         with lock:
@@ -1944,8 +2178,8 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         offline = not snap
         for st in stocks:
             code = st["code"]
-            # 信号行(下半)默认只展示有信号变动的股票; 行情行始终可见(仅在状态变化时操作 pack, 避免抖动)
-            visible = is_row_visible(sig_changes.get(code), SIG_CHANGE_WINDOW_SEC)
+            # 信号行(下半)默认只展示有信号变动的股票; 信号提示关闭时一律隐藏(运行时态短路)
+            visible = ui["show_signal"] and is_row_visible(sig_changes.get(code), SIG_CHANGE_WINDOW_SEC)
             if row_vis.get(code, True) != visible:
                 _apply_visibility(code, visible)
                 row_vis[code] = visible
@@ -1957,6 +2191,7 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             chg = r.get("chg_pct")
             sig = r.get("signal")
             delayed = bool(r.get("delayed"))
+            name_l.config(text=format_stock_name(st["name"], delayed))
             price_l.config(text=f"{price:.2f}" if isinstance(price, (int, float)) else "--")
             if isinstance(chg, (int, float)):
                 col = up_color if chg > 0 else (down_color if chg < 0 else style["flat"])
@@ -1964,9 +2199,9 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
                 chg_l.config(text=f"{sign}{chg:.2f}%", fg=col)
             else:
                 chg_l.config(text="", fg=style["flat"])
-            sig_l.config(text="●", fg=sig_colors.get(sig, style["flat"]))
-            # 延时标记: 港股/美股免费源约15分钟延时, 标"延时"提醒数据非实时
-            dl_l.config(text="延时" if delayed else "", fg=style["dl"])
+            sig_l.config(text="●", fg=style["flat"])
+            # 延时标记已并入股票名(format_stock_name 处理), 此处留空避免重复
+            dl_l.config(text="", fg=style["dl"])
             # 下半部分: 信号提示
             sdot, slv, sbb = sig_rows[code]
             bull = r.get("bull")

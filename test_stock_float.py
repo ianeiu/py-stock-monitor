@@ -1448,5 +1448,89 @@ class TestMoveStockInOrder(unittest.TestCase):
         self.assertIs(result[1], a)
 
 
+# ----------------------------------------------------------------------------
+# 10. 主题强调色 + 信号提示开关 (功能①②)
+# ----------------------------------------------------------------------------
+
+
+# ----------------------------------------------------------------------------
+# 12. 设置面板: 透明度 / 灰度(实时生效 + 持久化) 与 信号整块显隐
+#     闭包(_apply_alpha / _apply_grayness / _reapply_style / _toggle_signal)无头无法
+#     import, 涉及 Toplevel / 真实 widget 重刷的项标注「需真机目测」, 不伪造通过。
+# ----------------------------------------------------------------------------
+class TestSettingsPanel(unittest.TestCase):
+    def test_rebuild_style_with_grayness(self):
+        # grayness 改变强调色(涨/跌/信号色)的饱和度, 但 bg/fg 等非强调色有意不动
+        st1 = sf.build_style({"grayness": 0.0})
+        st2 = sf.build_style({"grayness": 1.0})
+        self.assertNotEqual(st1["up"], st2["up"])            # 涨色被去饱和
+        self.assertNotEqual(st1["sig_colors"], st2["sig_colors"])  # 信号色被去饱和
+        # bg 等非强调色(设计上有意)不受 grayness 影响,
+        # 与 test_build_style_non_accent_colors_not_desaturated 一致
+        self.assertEqual(st1["bg"], st2["bg"])
+
+    def test_save_config_key_roundtrip(self):
+        # _save_config_key 写入 [settings] 段并持久化; float 落为裸数值(合法 TOML)
+        try:
+            import tomllib
+        except ImportError:
+            tomllib = None
+        if tomllib is None:
+            self.skipTest("tomllib 不可用(需 py3.11+)")
+        with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:
+            f.write("[settings]\nfloat_alpha = 0.90\n")
+            tmppath = f.name
+        try:
+            sf._save_config_key("float_alpha", 0.95, path=tmppath)
+            with open(tmppath, "rb") as fh:
+                data = tomllib.load(fh)
+            self.assertEqual(data["settings"]["float_alpha"], 0.95)
+            self.assertNotEqual(data["settings"]["float_alpha"], 0.90)
+            # 再写 grayness, 两键并存
+            sf._save_config_key("grayness", 0.3, path=tmppath)
+            with open(tmppath, "rb") as fh:
+                data = tomllib.load(fh)
+            self.assertEqual(data["settings"]["grayness"], 0.3)
+            self.assertEqual(data["settings"]["float_alpha"], 0.95)
+        finally:
+            os.unlink(tmppath)
+
+    def test_hex_color_invalid_and_none_returns_default(self):
+        # _hex_color 对 None / 非法串返回 default; 合法 3/6 位(含大小写)原值返回
+        # (该函数与主题色无关, 保留其覆盖以防回归)
+        self.assertIsNone(sf._hex_color(None, None))
+        self.assertEqual(sf._hex_color("not-a-color", "#000000"), "#000000")
+        self.assertEqual(sf._hex_color("#zzz", None), None)
+        self.assertEqual(sf._hex_color("#abc", "#000000"), "#abc")
+        self.assertEqual(sf._hex_color("#a1b2c3", "#000000"), "#a1b2c3")
+        self.assertEqual(sf._hex_color("#ABCDEF", "#000000"), "#ABCDEF")
+
+    def test_toggle_signal_hides_header_widgets(self):
+        # _toggle_signal 是 run_hud 内闭包, 无头无法 import/实例化 Tk 根;
+        # 信号区整块显隐(分隔线 sep / 标题 sighead / 容器 sigpane 的 pack/pack_forget)
+        # 由代码层 winfo_ismapped 守卫 + before=status 保序保证, 需真机目测。
+        self.skipTest("信号区整块显隐需真机目测: _toggle_signal 为 run_hud 闭包, 无头无法 import")
+
+    def test_apply_alpha_bounds(self):
+        # _apply_alpha 是 run_hud 内闭包, 依赖真实 Tk 根(root.attributes)与 nonlocal alpha,
+        # 无头无法 import; 其边界 clamp(max(0.30, min(1.0, val))) 逻辑需真机目测。
+        self.skipTest("透明度边界 clamp 需真机目测: _apply_alpha 为 run_hud 闭包, 无头无法 import")
+
+
+class TestFormatStockName(unittest.TestCase):
+    """format_stock_name 纯函数: 延时源在股票名后追加（延时）提示。"""
+    def test_format_stock_name(self):
+        self.assertEqual(sf.format_stock_name("小米", False), "小米")
+        self.assertEqual(sf.format_stock_name("小米", True), "小米（延时）")
+        self.assertEqual(sf.format_stock_name("腾讯控股", True), "腾讯控股（延时）")
+
+
+class TestForceRefreshEvent(unittest.TestCase):
+    """↺ 立即刷新: 依赖 Tk 主循环与后台 worker 线程, 无头无法 import 闭包/局部事件。"""
+    def test_force_refresh_sets_event(self):
+        # _force_refresh 与 refresh_event 是 run_hud 闭包/局部变量, 无法无头 import。
+        self.skipTest("↺ 立即刷新需真机目测: 依赖 Tk 主循环与 worker 线程")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
