@@ -32,6 +32,7 @@ import sys
 import time
 import threading
 import urllib.request
+from urllib.parse import quote
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
@@ -154,6 +155,70 @@ def fetch(url, timeout=8) -> str:
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read().decode("utf-8", "ignore")
+
+
+def _parse_search_response(text: str) -> List[dict]:
+    """解析腾讯 smartbox 搜索响应为 {"code","name"} 列表(代码带市场前缀)。
+
+    腾讯 smartbox 接口返回形如:
+        v_hint="sh~600519~贵州茅台~gzmt~GP-A^sz~000001~平安银行~payh~GP-A^..."
+    每条记录以 ^ 分隔, 字段以 ~ 分隔: {market}~{code}~{name}~{pinyin}~{type}。
+    市场前缀: sh=上海, sz=深圳, hk=港股, us=美股; 未知市场项跳过。
+    响应为空 / 无 v_hint / 无有效记录 → 返回 [] (优雅降级)。结果按 code 去重。
+    """
+    if not text:
+        return []
+    m = re.search(r'v_hint="([^"]*)"', text)
+    if not m:
+        return []
+    content = m.group(1)
+    if not content:
+        return []
+
+    known_markets = {"sh", "sz", "hk", "us"}
+    results: List[dict] = []
+    seen: set = set()
+    for rec in content.split("^"):
+        if not rec:
+            continue
+        parts = rec.split("~")
+        if len(parts) < 3:
+            continue
+        market, code, name = parts[0], parts[1], parts[2]
+        # 腾讯 smartbox 返回的 name 可能包含字面 \uXXXX 转义序列(如 'TCL\\u79d1\\u6280'),
+        # 需解码为明文中文; 若 name 已是明文中文(非 ASCII 字节, 无法 latin1 编码),
+        # 则保持原样, 避免 latin1 编码抛 UnicodeEncodeError。
+        try:
+            name = name.encode("latin1").decode("unicode_escape")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            pass
+        if not market or not code or not name:
+            continue
+        if market not in known_markets:
+            continue
+        full_code = f"{market}{code}"
+        if full_code in seen:
+            continue
+        seen.add(full_code)
+        results.append({"code": full_code, "name": name})
+    return results
+
+
+def search_stocks(query: str, limit: int = 10) -> List[dict]:
+    """按名称/代码模糊搜索股票, 复用腾讯 smartbox 搜索接口(无需 token)。
+
+    返回 [{"code","name"}] (代码带市场前缀)。空查询 / 网络异常 / 解析异常
+    → 返回 [] (调用方据此显示"无匹配结果", 不让搜索错误拖垮主程序)。
+    """
+    if not query or not query.strip():
+        return []
+    q = quote(query.strip())
+    url = f"https://smartbox.gtimg.cn/s3/?q={q}&t=all"
+    try:
+        resp = fetch(url)
+        return _parse_search_response(resp)[:limit]
+    except Exception:
+        return []
 
 
 def market_of(code) -> str:
@@ -610,6 +675,15 @@ def map_signal(net: int, prev_sig: Optional[str] = None) -> str:
     return _LEVEL_SIG[lvl]
 
 
+def signal_became_changed(prev_sig, sig) -> bool:
+    """Return True only when sig actually changed AND we have a prior reading.
+
+    首次观测(prev_sig 为 None)不计为"变动" —— 否则每只股票都会在启动瞬间
+    被标记"刚变动", 进而在信号面板展示 SIG_CHANGE_WINDOW_SEC 秒(启动瞬时全显 bug)。
+    """
+    return prev_sig is not None and prev_sig != sig
+
+
 # 打分函数注册表: 每个返回 (delta_bull, delta_bear, reasons:list[str])
 def _score_ma(price: float, vals: dict):  # noqa: ANN001
     bull = bear = 0
@@ -887,7 +961,7 @@ def _save_config_key(key: str, value, path: str = None) -> None:
     """向 config.toml 写入单个 [settings] 键值对（保留式）。用于设置面板实时持久化。
 
     - path: 目标文件; 缺省遍历 SETTINGS_CANDIDATES 取第一个已存在者, 都不存在则静默跳过。
-    - float 值用 repr 落为合法 TOML 数值(如 0.94, 无引号); 其它值用 repr(str(value)) 落为字符串。
+    - bool 值落为裸 TOML 布尔(如 True/False, 无引号), 重启可正确回读; float 值用 repr 落为合法 TOML 数值(如 0.94, 无引号); 其它值用 repr(str(value)) 落为字符串。
     - 保留其它段与注释; 异常静默吞掉, 不阻塞 UI。
     """
     try:
@@ -904,9 +978,14 @@ def _save_config_key(key: str, value, path: str = None) -> None:
         if '[settings]' not in text:
             text = '[settings]\n' + text
         key_pat = re.compile(r'^\s*' + re.escape(key) + r'\s*=')
-        # float -> 裸数值(TOML 合法); 其余 -> 字符串 repr(带引号, 安全)
-        new_line = (f'{key} = {repr(value)}' if isinstance(value, float)
-                    else f'{key} = {repr(str(value))}')
+        # bool -> 裸布尔(TOML 要求小写 true/false, 与 Python str(False)='False' 不同);
+        # float -> 裸数值; 其余 -> 字符串
+        if isinstance(value, bool):
+            new_line = f"{key} = {'true' if value else 'false'}"
+        elif isinstance(value, float):
+            new_line = f"{key} = {repr(value)}"
+        else:
+            new_line = f"{key} = {repr(str(value))}"
         lines = text.split('\n')
         found = False
         out: List[str] = []
@@ -1517,10 +1596,15 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         root.destroy()
     root.protocol("WM_DELETE_WINDOW", _quit)
 
-    close_btn = tk.Label(header, text=" × ", bg=style["header"], fg=style["fg_dim"],
-                         font=style["FONT_SM"], cursor="hand2")
-    close_btn.pack(side="right", padx=(0, 3))
-    close_btn.bind("<Button-1>", lambda e: _quit())
+    # 注意: 以下 header 按钮均用 side="right" 打包, 后打包的更靠左。
+    # 目标左→右顺序: ⚙️设置 → 📌置顶 → ＋新增 → ⏸暂停 → {Ns}频率 → ↺刷新
+    # 故 pack 顺序应为从右到左: refresh_btn → freq_btn → pause_btn → add_btn → top_btn → set_btn
+
+    # 立即刷新: ↺ 按钮(点击触发后台立即取数)
+    refresh_btn = tk.Label(header, text=" ↺ ", bg=style["header"], fg=style["fg_dim"],
+                           font=style["FONT_SM"], cursor="hand2")
+    refresh_btn.pack(side="right", padx=(0, 2))
+    refresh_btn.bind("<Button-1>", lambda e: _force_refresh())
 
     # 频率控件(1/3/5s 循环)
     freq_btn = tk.Label(header, text=f" {refresh_sec}s ", bg=style["header"], fg=style["fg_dim"],
@@ -1541,7 +1625,7 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     add_btn.bind("<Button-1>", lambda e: _add_stock_dialog())
 
     # 窗口置顶开关: 📌 按钮(功能④)
-    # 注意: 此处 ui 字典尚未定义(L1566 之后), 故直接读 settings 默认(与 ui["topmost"] 同源)
+    # 注意: 此处 ui 字典尚未定义, 故直接读 settings 默认(与 ui["topmost"] 同源)
     _top_on = bool(settings.get("topmost", True))
     top_btn = tk.Label(header, text=(" 📌 " if _top_on else " 📍 "), bg=style["header"],
                        fg=(style["fg"] if _top_on else style["fg_dim"]),
@@ -1549,23 +1633,11 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     top_btn.pack(side="right", padx=(0, 2))
     top_btn.bind("<Button-1>", lambda e: _toggle_topmost())
 
-    # 信号提示显隐开关: 🔔/🔕 按钮(功能①, 运行时态, 不落盘; 默认显示)
-    sig_btn = tk.Label(header, text=" 🔔 ", bg=style["header"], fg=style["fg"],
-                       font=style["FONT_SM"], cursor="hand2")
-    sig_btn.pack(side="right", padx=(0, 2))
-    sig_btn.bind("<Button-1>", lambda e: _toggle_signal())
-
-    # 设置面板: ⚙️ 按钮(透明度+灰度), 点开实时调节并持久化
+    # 设置面板: ⚙️ 按钮(透明度+灰度+变动提示), 点开实时调节并持久化
     set_btn = tk.Label(header, text=" ⚙ ", bg=style["header"], fg=style["fg_dim"],
                        font=style["FONT_SM"], cursor="hand2")
     set_btn.pack(side="right", padx=(0, 2))
     set_btn.bind("<Button-1>", lambda e: _open_settings_panel())
-
-    # 立即刷新: ↺ 按钮(点击触发后台立即取数)
-    refresh_btn = tk.Label(header, text=" ↺ ", bg=style["header"], fg=style["fg_dim"],
-                           font=style["FONT_SM"], cursor="hand2")
-    refresh_btn.pack(side="right", padx=(0, 2))
-    refresh_btn.bind("<Button-1>", lambda e: _force_refresh())
 
     drag = {"x": 0, "y": 0}
 
@@ -1752,19 +1824,152 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         status.config(text=("📌 窗口置顶" if on else "📍 取消置顶"))
 
     def _add_stock_dialog():
-        """弹输入对话框解析并添加自选(功能①)。"""
-        if simpledialog is None:
+        """自定义『添加自选』模态: 名称模糊搜索 -> 选择 -> 添加(功能①)。
+
+        复用 style 主题; 搜索走后台线程避免冻结 HUD。最终仍调用 _add_stock(
+        {"code","name"}) (签名不变, 由上层回写 stocks.toml)。无 tkinter 时直接返回。
+        """
+        if tk is None or root is None:
             return
-        s = simpledialog.askstring(
-            "添加自选", "输入 code,name (如 sh600519,贵州茅台)\n前缀需为 hk/sh/sz/us")
-        if not s:
-            return
-        try:
-            parsed = parse_add_input(s)
-        except ValueError as e:
-            status.config(text=f"添加失败: {e}")
-            return
-        _add_stock(parsed)
+        # ---- 模态弹窗 ----
+        dlg = tk.Toplevel(root)
+        dlg.transient(root)
+        dlg.grab_set()
+        dlg.title("添加自选")
+        # 相对主窗口居中(避免飘在桌面左上角); 高度 420→460 给手动输入行留空间
+        root.update_idletasks()
+        dw, dh = 380, 460
+        x = root.winfo_x() + (root.winfo_width() - dw) // 2
+        y = root.winfo_y() + (root.winfo_height() - dh) // 2
+        dlg.geometry(f"{dw}x{dh}+{x}+{y}")
+        dlg.configure(bg=style["bg"])
+
+        # 选中的结果 + 与 listbox index 平行的结果列表(闭包引用, 原地变更无需 nonlocal)
+        selected = {"code": None, "name": None}
+        results: List[dict] = []
+
+        def _normalize_manual_code(raw: str):
+            """手动代码归一化(功能②): 空→None; 以 sh/sz/hk/us 前缀开头→原样返回;
+            纯 6 位数字→首位为 6 归 sh 否则 sz(如 600519→sh600519, 000589→sz000589);
+            其余(长度/字符不符)→None。"""
+            if not raw:
+                return None
+            s = raw.strip().lower()
+            if not s:
+                return None
+            if s[:2] in ("sh", "sz", "hk", "us"):
+                return s
+            if len(s) == 6 and s.isdigit():
+                return ("sh" if s[0] == "6" else "sz") + s
+            return None
+
+        def _populate(items: List[dict]):
+            result_lb.delete(0, tk.END)
+            results.clear()
+            if not items:
+                result_lb.insert(tk.END, "无匹配结果")
+                return
+            for it in items:
+                results.append({"code": it["code"], "name": it["name"]})
+                result_lb.insert(tk.END, f"{it['name']}  ({it['code']})")
+
+        def _run_search(q: str):
+            try:
+                found = search_stocks(q, limit=10)
+            except Exception:
+                found = []
+            # 回主线程刷新 UI, 避免跨线程操作 Tk widget
+            root.after(0, lambda: _populate(found))
+
+        def _do_search():
+            q = q_entry.get().strip()
+            if not q:
+                return
+            results.clear()
+            result_lb.delete(0, tk.END)
+            result_lb.insert(tk.END, "搜索中…")
+            threading.Thread(target=lambda: _run_search(q), daemon=True).start()
+
+        def _on_select(event=None):
+            sel = result_lb.curselection()
+            if not sel:
+                return
+            idx = sel[0]
+            if idx >= len(results):
+                return
+            chosen = results[idx]
+            selected["code"] = chosen["code"]
+            selected["name"] = chosen["name"]
+            name_entry.delete(0, tk.END)
+            name_entry.insert(0, chosen["name"])
+
+        def _on_add():
+            code = selected["code"]
+            if code is None:
+                # 搜索未选择 → 退而求其次读手动代码输入框(功能②, 与搜索并存)
+                raw = manual_code_entry.get()
+                normalized = _normalize_manual_code(raw)
+                if normalized is None:
+                    status.config(text="代码格式无效" if raw.strip() else "请先搜索选择，或手动输入代码")
+                    return
+                code = normalized
+            name = name_entry.get().strip() or code
+            _add_stock({"code": code, "name": name})
+            dlg.destroy()
+
+        def _on_cancel():
+            dlg.destroy()
+
+        # ---- 控件 ----
+        # 显示名(可修改): 置于顶部, 便于搜索选择后直接编辑再『添加』
+        tk.Label(dlg, text="显示名（可修改）",
+                 bg=style["bg"], fg=style["fg_dim"],
+                 font=style["FONT_SM"], anchor="w").pack(fill="x", padx=8, pady=(8, 2))
+        name_entry = tk.Entry(dlg, bg=style["bg"], fg=style["fg"], font=style["FONT_SM"])
+        name_entry.pack(fill="x", padx=8, pady=(0, 4))
+
+        tk.Label(dlg, text="股票名称搜索（模糊匹配）",
+                 bg=style["bg"], fg=style["fg"],
+                 font=style["FONT_SM"], anchor="w").pack(fill="x", padx=8, pady=(8, 2))
+
+        q_entry = tk.Entry(dlg, bg=style["bg"], fg=style["fg"], font=style["FONT_SM"])
+        q_entry.pack(fill="x", padx=8, pady=(0, 4))
+        q_entry.bind("<Return>", lambda e: _do_search())
+        q_entry.focus_set()
+
+        tk.Button(dlg, text="搜索", command=_do_search,
+                  bg=style["bg"], fg=style["fg"], font=style["FONT_SM"]
+                  ).pack(anchor="w", padx=8, pady=(0, 4))
+
+        # 功能②: 手动代码输入入口(与搜索选择并存, 不替代搜索流程)
+        tk.Label(dlg, text="代码（手动添加，如 sh600519 / 600519）",
+                 bg=style["bg"], fg=style["fg_dim"],
+                 font=style["FONT_SM"], anchor="w").pack(fill="x", padx=8, pady=(0, 2))
+        manual_code_entry = tk.Entry(dlg, bg=style["bg"], fg=style["fg"], font=style["FONT_SM"])
+        manual_code_entry.pack(fill="x", padx=8, pady=(0, 4))
+        manual_code_entry.bind("<Return>", lambda e: _on_add())
+
+        list_frame = tk.Frame(dlg, bg=style["bg"])
+        list_frame.pack(fill="both", expand=True, padx=8, pady=(0, 4))
+        result_lb = tk.Listbox(list_frame, bg=style["bg"], fg=style["fg"],
+                               font=style["FONT_SM"], selectmode=tk.SINGLE)
+        scroll = tk.Scrollbar(list_frame, command=result_lb.yview)
+        result_lb.config(yscrollcommand=scroll.set)
+        result_lb.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        result_lb.bind("<<ListboxSelect>>", _on_select)
+        result_lb.bind("<Double-Button-1>", _on_select)
+
+        btn_row = tk.Frame(dlg, bg=style["bg"])
+        btn_row.pack(fill="x", padx=8, pady=(4, 8))
+        tk.Button(btn_row, text="添加", command=_on_add,
+                  bg=style["bg"], fg=style["fg"], font=style["FONT_SM"]
+                  ).pack(side="left", padx=(0, 4))
+        tk.Button(btn_row, text="取消", command=_on_cancel,
+                  bg=style["bg"], fg=style["fg"], font=style["FONT_SM"]
+                  ).pack(side="left")
+
+        result_lb.insert(tk.END, "输入关键词后点击『搜索』")
 
     def _add_stock(parsed):
         """把解析后的股票加入内存列表 + GUI + 回写 stocks.toml(功能①)。"""
@@ -1893,8 +2098,6 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         """切换信号提示显隐(功能①)。关闭时整块隐藏(含标题/分隔线/容器); 开启时恢复。"""
         ui["show_signal"] = not ui["show_signal"]
         on = ui["show_signal"]
-        sig_btn.config(text=(" 🔔 " if on else " 🔕 "),
-                       fg=(style["fg"] if on else style["fg_dim"]))
         # 整块显隐: 分隔线 / 信号标题 / 信号容器
         # winfo_ismapped 守卫避免重复 pack; before=status 维持原始上下顺序(否则布局错乱)
         if on:
@@ -1964,6 +2167,38 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             "灰度", 0.0, 1.0, cur_gray, 0.05,
             lambda val: _apply_grayness(val))
 
+        # --- 变动提示开关(功能①, 运行时态, 不落盘) ---
+        # 仅触发 _toggle_signal() 并刷新自身文案, 整块显隐逻辑由 _toggle_signal 负责
+        sig_toggle = tk.Button(
+            panel, text=("🔔 显示变动" if ui.get("show_signal", True) else "🔕 隐藏变动"),
+            bg=style["bg"], fg=style["fg"], font=style["FONT_SM"],
+            cursor="hand2", relief="flat", padx=12, pady=4)
+
+        def _toggle_signal_label():
+            """点击后切换信号显隐, 并同步按钮文案。"""
+            _toggle_signal()
+            sig_toggle.config(
+                text=("🔔 显示变动" if ui["show_signal"] else "🔕 隐藏变动"))
+        sig_toggle.config(command=_toggle_signal_label)
+        sig_toggle.pack(pady=6, padx=12, anchor="w")
+
+        # --- 变动消息提示开关(控制 OS 弹框+声音, 持久化) ---
+        def _toggle_notify():
+            on = not notifier.enabled
+            notifier.enabled = on
+            notifier.sound = on          # 单总开关: 弹框与声音同开同关
+            _save_config_key("notify", on)
+            _save_config_key("notify_sound", on)
+            notify_toggle.config(
+                text=("📢 变动消息：开" if on else "🔇 变动消息：关"))
+        notify_toggle = tk.Button(
+            panel,
+            text=("📢 变动消息：开" if notifier.enabled else "🔇 变动消息：关"),
+            bg=style["bg"], fg=style["fg"], font=style["FONT_SM"],
+            cursor="hand2", relief="flat", padx=12, pady=4)
+        notify_toggle.config(command=_toggle_notify)
+        notify_toggle.pack(pady=6, padx=12, anchor="w")
+
         # 关闭按钮
         close = tk.Button(panel, text="完成", command=panel.destroy,
                          bg=style["header"], fg=style["fg"],
@@ -2022,13 +2257,11 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             sbb.configure(fg=style["fg_dim"])
             # sdot 语义色保持 sig_colors(由刷新循环按信号着色, 此处不动)
         # header 按钮(统一底色 + dim 高亮; 特殊高亮由各 toggle 自管)
-        for btn in (close_btn, freq_btn, pause_btn, add_btn, top_btn, sig_btn, set_btn):
+        for btn in (freq_btn, pause_btn, add_btn, top_btn, set_btn):
             btn.configure(bg=style["header"], fg=style["fg_dim"])
         # 按钮特殊高亮恢复
         if ui.get("topmost"):
             top_btn.configure(fg=style["fg"])
-        if ui.get("show_signal"):
-            sig_btn.configure(fg=style["fg"])
         root.update_idletasks()
 
     # ---- Windows 闪烁(经 root.after 回主线程, 由 notifier 注入) ----
@@ -2108,8 +2341,9 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
                 cross_sa = (not prev_sa and sa) and not sa_cool
                 # 信号档位变动也走冷却: 价格卡在指标边界反复横跳时, 同一只冷却期内只提示一次
                 sig_changed = (prev_sig != sig)
-                if sig_changed:
-                    last_sig_change[code] = time.time()  # 功能②: 记录信号变动时间戳
+                # 初次观测(prev_sig 为 None)不计为"变动": 否则启动瞬间所有股都被打时间戳 → 全假变动可见 300s
+                if signal_became_changed(prev_sig, sig):
+                    last_sig_change[code] = time.time()  # 功能②: 记录信号变动时间戳(仅真实档位变动)
                 sig_cool = (cd > 0 and isinstance(prev, dict)
                             and prev.get("sig_alert_at") is not None
                             and (now_t - prev.get("sig_alert_at")) < cd)
@@ -2290,7 +2524,7 @@ def main() -> None:
     warm_klines(stocks)
     run_hud(stocks, settings,
             log_fn=(do_log if log else None),
-            notifier=(notifier if notify_enabled else None),
+            notifier=notifier,
             cooldown=cooldown,
             stocks_path=stocks_path)
 

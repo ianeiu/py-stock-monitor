@@ -538,6 +538,120 @@ class TestNotifier(unittest.TestCase):
 
 
 # ----------------------------------------------------------------------------
+# 8b. Notifier 开关门控 + _save_config_key 布尔回归 (本次新增, 无头)
+#     平台无关: 同时 patch sf.notify_mac(darwin) 与 sf.Notifier._notify_linux(linux),
+#     断言禁用时不调用、启用时按 sys.platform 命中对应分支。
+#     并通过 _save_config_key 的 bool 落盘往返, 锚定「裸小写布尔」修复
+#     (旧实现会写 notify = 'False' 字符串, 重启后 bool('False')==True 误判为开)。
+# ----------------------------------------------------------------------------
+class TestNotifierGatingAndConfig(unittest.TestCase):
+    """本次 QA 新增: 覆盖 (1) Notifier 门控 (2) 通知开关纯逻辑契约
+    (3) _save_config_key 对 bool 的落盘往返固化。
+
+    不实例化 Tk, 不依赖 sys.platform —— 用 patch.object 同时拦截
+    darwin/linux 两个平台分支, 按当前平台断言「唯一命中分支」。
+    """
+
+    def test_disabled_no_dispatch(self):
+        """enabled=False 时 notify 必须提前 return, 任何平台分支都不应被调用。"""
+        with mock.patch.object(sf, "notify_mac") as m_mac, \
+             mock.patch.object(sf.Notifier, "_notify_linux") as m_linux:
+            n = sf.Notifier(enabled=False, sound=True)
+            n.notify("测试消息")
+            m_mac.assert_not_called()
+            m_linux.assert_not_called()
+
+    def test_enabled_dispatches_platform_branch(self):
+        """enabled=True 时按 sys.platform 命中唯一对应分支; darwin 须带上 sound=True。"""
+        with mock.patch.object(sf, "notify_mac") as m_mac, \
+             mock.patch.object(sf.Notifier, "_notify_linux") as m_linux:
+            n = sf.Notifier(enabled=True, sound=True)
+            n.notify("x")
+            if sys.platform == "darwin":
+                m_mac.assert_called_once_with("x", True)
+                m_linux.assert_not_called()
+            elif sys.platform.startswith("linux"):
+                m_linux.assert_called_once_with("x")
+                m_mac.assert_not_called()
+            else:
+                # windows/其它: 走 _notify_windows(winsound+flash), 不命中 mac/linux 分支
+                m_mac.assert_not_called()
+                m_linux.assert_not_called()
+
+    def test_notifier_object_toggle_contract(self):
+        """纯逻辑契约: 构造 disabled 对象状态正确; 仿 toggle 闭包翻转
+        enabled/sound 后, 再 notify 会进入平台分发(由 test_enabled_dispatches_platform_branch 佐证)。"""
+        n = sf.Notifier(enabled=False)
+        self.assertIs(False, n.enabled)
+        self.assertIs(False, n.sound)
+        # 模拟「变动消息提示」单一主开关翻转 notifier.enabled / notifier.sound
+        n.enabled = True
+        n.sound = True
+        self.assertIs(True, n.enabled)
+        self.assertIs(True, n.sound)
+        with mock.patch.object(sf, "notify_mac") as m_mac, \
+             mock.patch.object(sf.Notifier, "_notify_linux") as m_linux:
+            n.notify("toggle-on")
+            if sys.platform == "darwin":
+                m_mac.assert_called_once_with("toggle-on", True)
+            elif sys.platform.startswith("linux"):
+                m_linux.assert_called_once()
+            # windows/其它: 经 _notify_windows 分发(本类不实例化 Tk, 此处不拦截)
+
+    def test_save_config_key_bool_false_roundtrip(self):
+        """回归锚点: bool False 必须落为裸小写布尔 'false' 并经 tomllib 回读为真实 bool。
+
+        旧实现会把 bool 写成字符串 'False' -> 重启 bool('False')==True 误判为开。
+        本测试固化修复: 落盘 notify = false, 回读 data['settings']['notify'] is False(真 bool, 非字符串)。
+        """
+        try:
+            import tomllib
+        except ImportError:
+            tomllib = None
+        if tomllib is None:
+            self.skipTest("tomllib 不可用(需 py3.11+)")
+        path = "/tmp/qa_notify_cfg.toml"
+        try:
+            Path(path).write_text("[settings]\nnotify = 'stale'\n", encoding="utf-8")
+            sf._save_config_key("notify", False, path=path)
+            sf._save_config_key("notify_sound", False, path=path)
+            with open(path, "rb") as fh:
+                data = tomllib.load(fh)
+            self.assertIs(False, data["settings"]["notify"])
+            self.assertIs(False, data["settings"]["notify_sound"])
+            raw = Path(path).read_bytes()
+            self.assertIn(b"notify = false", raw)
+        finally:
+            if os.path.exists(path):
+                os.remove(path)
+
+    def test_save_config_key_bool_true_roundtrip(self):
+        """对照: bool True 落为裸小写布尔 'true', 回读为真实 bool(True), 且非字符串。"""
+        try:
+            import tomllib
+        except ImportError:
+            tomllib = None
+        if tomllib is None:
+            self.skipTest("tomllib 不可用(需 py3.11+)")
+        path = "/tmp/qa_notify_cfg.toml"
+        try:
+            Path(path).write_text("[settings]\nnotify = 'stale'\n", encoding="utf-8")
+            sf._save_config_key("notify", True, path=path)
+            with open(path, "rb") as fh:
+                data = tomllib.load(fh)
+            self.assertIs(True, data["settings"]["notify"])
+            raw = Path(path).read_bytes()
+            self.assertIn(b"notify = true", raw)
+            # 反向锚定: 不得是字符串形态(旧 Bug 表征)
+            self.assertNotIn(b"notify = 'false'", raw)
+            self.assertNotIn(b"notify = 'False'", raw)
+            self.assertNotIn(b"notify = 'True'", raw)
+        finally:
+            if os.path.exists(path):
+                os.remove(path)
+
+
+# ----------------------------------------------------------------------------
 # 9. CSV 去重 + 新增字段 (向后兼容)
 # ----------------------------------------------------------------------------
 class TestCsv(unittest.TestCase):
@@ -1530,6 +1644,120 @@ class TestForceRefreshEvent(unittest.TestCase):
     def test_force_refresh_sets_event(self):
         # _force_refresh 与 refresh_event 是 run_hud 闭包/局部变量, 无法无头 import。
         self.skipTest("↺ 立即刷新需真机目测: 依赖 Tk 主循环与 worker 线程")
+
+
+class TestSignalBecameChanged(unittest.TestCase):
+    """回归锚点: 信号档位"真实变动"判定。
+
+    针对修复: 启动瞬时 prev_sig 为 None, 若 (prev_sig != sig) 直接视为变动,
+    会导致所有股票在信号面板假变动可见 300s(信号提示没有仅展示有变动 bug)。
+    修正后: 首次观测(prev_sig is None)不计为变动。
+    """
+    def test_first_observation_not_a_change(self):
+        # 回归锚点: 无 prev_sig 的首次观测必须不是"变动"
+        self.assertFalse(sf.signal_became_changed(None, "L"))
+        self.assertFalse(sf.signal_became_changed(None, "H"))
+
+    def test_real_change_is_a_change(self):
+        self.assertTrue(sf.signal_became_changed("L", "H"))
+        self.assertTrue(sf.signal_became_changed("H", "L"))
+        self.assertTrue(sf.signal_became_changed("⚪ 持有/观望", "🔴 买入(偏强)"))
+
+    def test_same_level_not_a_change(self):
+        self.assertFalse(sf.signal_became_changed("L", "L"))
+        self.assertFalse(sf.signal_became_changed("H", "H"))
+
+    def test_none_to_none_not_a_change(self):
+        self.assertFalse(sf.signal_became_changed(None, None))
+
+
+# ----------------------------------------------------------------------------
+# 20. 股票模糊搜索: _parse_search_response + search_stocks (纯函数 / 桩 fetch)
+#     无 headless 限制: 不实例化 Tk, 不真实联网; 用 mock.patch 隔离 sf.fetch。
+# ----------------------------------------------------------------------------
+class TestStockSearch(unittest.TestCase):
+    """验证腾讯 smartbox 搜索响应的解析与搜索入口。
+
+    - _parse_search_response: 市场前缀(sh/sz/hk/us)、未知市场跳过、
+      按 code 去重、非法/空/无 v_hint 优雅降级为 []。
+    - search_stocks: 空/空白查询短路返回 []; 委托 sf.fetch 后解析; 网络异常吞掉返回 []。
+    """
+
+    # 腾讯 smartbox 真实格式: v_hint="market~code~name~pinyin~type^..."
+    HAPPY_HINT = (
+        'v_hint="sh~600519~贵州茅台~gzmt~GP-A'
+        '^sz~000001~平安银行~payh~GP-A'
+        '^hk~00700~腾讯控股~txk~GP'
+        '^us~AAPL~苹果~pg~US"'
+    )
+
+    EXPECTED_HAPPY = [
+        {"code": "sh600519", "name": "贵州茅台"},
+        {"code": "sz000001", "name": "平安银行"},
+        {"code": "hk00700", "name": "腾讯控股"},
+        {"code": "usAAPL", "name": "苹果"},
+    ]
+
+    def test_parse_search_response_happy_path(self):
+        # 市场前缀直接拼接: sh/sz/hk/us + 代码
+        result = sf._parse_search_response(self.HAPPY_HINT)
+        self.assertEqual(result, self.EXPECTED_HAPPY)
+
+    def test_parse_unknown_market_skipped(self):
+        # 未知市场(xx)项必须被丢弃, 仅保留有效项
+        hint = ('v_hint="xx~999~X~x~GP'
+                '^sh~600519~贵州茅台~gzmt~GP-A"')
+        result = sf._parse_search_response(hint)
+        self.assertEqual(result, [{"code": "sh600519", "name": "贵州茅台"}])
+
+    def test_parse_dedup_by_code(self):
+        # 相同 code 出现两次 → 结果仅一条 (按 code 去重)
+        hint = ('v_hint="sh~600519~贵州茅台~gzmt~GP-A'
+                '^sh~600519~贵州茅台~gzmt~GP-A"')
+        result = sf._parse_search_response(hint)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["code"], "sh600519")
+
+    def test_parse_graceful_on_bad_input(self):
+        # 空串 / 无 v_hint / 字段不足 → 均返回 []
+        self.assertEqual(sf._parse_search_response(""), [])
+        self.assertEqual(sf._parse_search_response("no hint here"), [])
+        self.assertEqual(sf._parse_search_response('v_hint=""'), [])
+        # 防御性: ~ 不足 3 段 / 字段缺失 → 该条跳过, 整体 []
+        self.assertEqual(sf._parse_search_response('v_hint="bad"'), [])
+        self.assertEqual(sf._parse_search_response('v_hint="sh~~茅台~gzmt~GP-A"'), [])
+
+    def test_parse_search_response_decodes_unicode_escapes(self):
+        # Bug 1 回归: smartbox 返回的 name 含字面 \uXXXX 转义必须解码为明文中文
+        # (如 'TCL\\u79d1\\u6280' → 'TCL科技'); 明文中文名不受影响。
+        hint = 'v_hint="sz~000100~TCL\\u79d1\\u6280~tkl~GP-A"'
+        result = sf._parse_search_response(hint)
+        self.assertEqual(result, [{"code": "sz000100", "name": "TCL科技"}])
+
+    def test_search_stocks_delegates_to_fetch(self):
+        # 完整路径: fetch(canned hint) → _parse_search_response; q= 接线正确
+        from urllib.parse import quote as _quote
+        with mock.patch.object(sf, "fetch", return_value=self.HAPPY_HINT) as mfetch:
+            result = sf.search_stocks("茅台")
+        self.assertEqual(result, self.EXPECTED_HAPPY)
+        self.assertTrue(mfetch.called, "search_stocks 必须调用 fetch")
+        args, _ = mfetch.call_args
+        self.assertIn("q=" + _quote("茅台"), args[0], "搜索词必须经 q= 传入 URL")
+        self.assertIn("smartbox.gtimg.cn", args[0])
+        self.assertIn("t=all", args[0])
+
+    def test_search_stocks_whitespace_shortcircuits(self):
+        # 空/纯空白查询 → 短路返回 [], 不调用 fetch
+        with mock.patch.object(sf, "fetch") as mfetch:
+            self.assertEqual(sf.search_stocks("   "), [])
+            self.assertEqual(sf.search_stocks(""), [])
+        mfetch.assert_not_called()
+
+    def test_search_stocks_swallows_network_error(self):
+        # fetch 抛任意异常 → search_stocks 吞掉返回 [], 不向外逃逸
+        with mock.patch.object(sf, "fetch", side_effect=Exception("boom")):
+            result = sf.search_stocks("anything")
+        self.assertEqual(result, [])
 
 
 if __name__ == "__main__":
