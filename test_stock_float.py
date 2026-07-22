@@ -1760,5 +1760,153 @@ class TestStockSearch(unittest.TestCase):
         self.assertEqual(result, [])
 
 
+class TestGraynessReentrancyGuard(unittest.TestCase):
+    """灰度滑块 RecursionError 回归: 验证 _run_with_guard 重入守卫对 macOS Tk 重触发免疫。
+
+    无头环境: 全程用桩对象, 不实例化 Tk 根、不调用 run_hud / mainloop。
+    覆盖机理: 原生 bug 在于 _reapply_style 末尾的 root.update_idletasks() 在 macOS Tk
+    上会从当前活动 Scale 的 -command 回调内部重入事件循环、再次触发同一滑块 command,
+    无限嵌套 -> RecursionError。本组测试直接验证生产代码使用的 _run_with_guard 守卫,
+    并用桩复现「update_idletasks 重 fire 当前 Scale」场景, 断言:
+      (1) 实质工作仅执行一次 (applied 计数 == 1);
+      (2) 重入命令确实发生了 (scale_cmds >= 2), 证明复现了触发机制;
+      (3) 无 RecursionError, 且守卫标志在拖动后复位为 False。
+    附对照测试: 去掉守卫时同场景必抛 RecursionError, 证明确实复现了原始 bug。
+    """
+
+    def test_guard_runs_work_once_and_resets(self):
+        # 基础: 守卫不拦截首次调用, 返回工作结果, 完成后复位标志。
+        guard = {"v": False}
+        calls = []
+
+        def work():
+            calls.append(1)
+            return "ok"
+
+        self.assertEqual(sf._run_with_guard(guard, work), "ok")
+        self.assertEqual(calls, [1])
+        self.assertFalse(guard["v"], "守卫标志应在完成后复位")
+
+    def test_guard_reentrancy_skips_inner_and_no_recursion(self):
+        # 复现: 在 work 内部经 update_idletasks 重入, 再次进入同一守卫。
+        # 守卫失效将无限递归; 此处应只执行一次外层 work, 内层被跳过返回哨兵。
+        guard = {"v": False}
+        calls = []
+
+        def work():
+            calls.append(1)
+            inner = sf._run_with_guard(guard, work)   # 模拟 macOS 重触发同一回调
+            calls.append(("inner", inner))
+
+        sf._run_with_guard(guard, work)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0], 1)
+        # 内层被守卫跳过, 返回哨兵 _GUARD_SKIPPED
+        self.assertEqual(calls[1], ("inner", sf._GUARD_SKIPPED))
+        self.assertFalse(guard["v"], "守卫标志应在嵌套结束后复位")
+
+    def test_grayness_slider_fire_no_recursion_with_guard(self):
+        # 端到端桩: 镜像生产 _apply_grayness(使用 _run_with_guard + _style_busy) +
+        # _reapply_style 桩(末尾调用 root.update_idletasks) + FakeRoot 重 fire。
+        guard = {"v": False}
+        applied = []
+
+        def reapply_style_stub():
+            root.update_idletasks()                   # 复现 _reapply_style 末尾的调用
+
+        def apply_grayness(val):
+            def work():
+                v = max(0.0, min(1.0, val))
+                applied.append(v)
+                reapply_style_stub()
+            return sf._run_with_guard(guard, work)    # 与生产一致: _style_busy 守卫
+
+        scale_cmds = []
+
+        class FakeScale:
+            def __init__(self, command):
+                self.command = command
+
+            def fire(self, value):
+                scale_cmds.append(value)
+                # 模拟 make_slider 的 command=lambda v, cb=on_change: cb(float(v))
+                self.command(float(value))
+
+        class FakeRoot:
+            def update_idletasks(self):
+                # 复现 macOS 重入: 在 update_idletasks 内部同步再次 fire 当前活动 Scale
+                # 的 command(当前活动 Scale 即灰度滑块), 形成重入。
+                scale.fire(0.5)
+
+        scale = FakeScale(lambda v: apply_grayness(v))
+        root = FakeRoot()
+        # 用户拖一下灰度滑块 -> 触发一次 command
+        scale.fire(0.5)
+        self.assertEqual(applied, [0.5], "实质灰度工作应只执行一次(重入被守卫截断)")
+        self.assertTrue(len(scale_cmds) >= 2, "应存在重入 fire(<=1 说明未复现重入机制)")
+        self.assertFalse(guard["v"], "守卫标志应在拖动结束后复位")
+
+    def test_alpha_slider_also_guarded(self):
+        # 透明度滑块同样经 _run_with_guard + 同一 _style_busy 守卫, 重入须被截断。
+        guard = {"v": False}
+        applied = []
+
+        def reapply_style_stub():
+            root.update_idletasks()                   # 复现 _reapply_style 末尾的调用
+
+        def apply_alpha(val):
+            def work():
+                v = max(0.30, min(1.0, val))
+                applied.append(v)
+                reapply_style_stub()                  # 触发重入(与生产一致)
+            return sf._run_with_guard(guard, work)
+
+        reentered = {"n": 0}
+
+        class FakeScale:
+            def fire(self, value):
+                reentered["n"] += 1
+                apply_alpha(float(value))
+
+        class FakeRoot:
+            def update_idletasks(self):
+                scale.fire(0.8)                       # 重入触发当前活动 Scale
+
+        scale = FakeScale()
+        root = FakeRoot()
+        scale.fire(0.8)
+        self.assertEqual(applied, [0.8], "透明度实质工作应只执行一次")
+        self.assertTrue(reentered["n"] >= 2, "应存在重入 fire")
+        self.assertFalse(guard["v"])
+
+    def test_no_guard_would_recurse(self):
+        # 对照(证明测试确实复现了原始 bug 的触发机制): 去掉守卫后同场景必抛 RecursionError。
+        applied = []
+
+        def reapply_style_stub():
+            root.update_idletasks()
+
+        def apply_grayness_noguard(val):
+            v = max(0.0, min(1.0, val))
+            applied.append(v)
+            reapply_style_stub()                      # 此处无守卫 -> 无限重入
+
+        class FakeScale:
+            def __init__(self, command):
+                self.command = command
+
+            def fire(self, value):
+                self.command(float(value))
+
+        class FakeRoot:
+            def update_idletasks(self):
+                scale.fire(0.5)                       # 重入触发
+
+        scale = FakeScale(lambda v: apply_grayness_noguard(v))
+        root = FakeRoot()
+        with self.assertRaises(RecursionError):
+            scale.fire(0.5)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

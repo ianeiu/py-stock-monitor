@@ -1432,6 +1432,32 @@ SIG_COLORS = {
 SIG_SHORT = {k: (k.split(" ", 1)[1] if " " in k else k) for k in SIG_COLORS}
 SEP_COLOR = "#d8dadf"           # 分界横线颜色(浅灰)
 
+# 重入守卫哨兵: _run_with_guard 在持锁期间被嵌套调用时返回该值(表示实质工作被跳过)
+_GUARD_SKIPPED = object()
+
+
+def _run_with_guard(guard: dict, fn: Callable, *args, **kwargs):
+    """通用重入守卫包装器。
+
+    用于 macOS Tk 上 Scale 的 -command 回调经 root.update_idletasks() 重入事件循环、
+    再次触发同一滑块 command 造成的无限递归(RecursionError)防护。
+
+    guard 必须是可变 dict(形如 {"v": False}); 若 guard["v"] 为 True(说明正处在另一次
+    调用内部, 对当前回调的重入), 直接跳过 fn 的执行并返回 _GUARD_SKIPPED; 否则执行 fn,
+    并于 finally 中复位 guard["v"]=False, 确保外层调用照常完成、标志可靠还原。
+    即使 fn 内部(经 update_idletasks 等)重入触发同一回调, 嵌套调用也会因守卫立即返回,
+    递归被彻底切断, 且视觉样式已由外层调用正确应用。
+
+    返回: fn 的执行结果; 被守卫跳过时返回 _GUARD_SKIPPED。
+    """
+    if guard.get("v"):
+        return _GUARD_SKIPPED
+    guard["v"] = True
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        guard["v"] = False
+
 
 def _hex_color(s: Any, default: str) -> str:
     return s if isinstance(s, str) and re.fullmatch(r"#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})", s) else default
@@ -1570,11 +1596,15 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     # 透明度(0~1, 非法/越界回退默认)
     _a = settings.get("float_alpha", ALPHA_DEFAULT)
     alpha = _a if isinstance(_a, (int, float)) and 0 < _a <= 1 else ALPHA_DEFAULT
-    # 刷新周期(默认5s; 频率控件在 1/3/5/10 间循环)
+    # 刷新周期(默认5s; 频率控件在 1/5/10 间循环; 历史残留 3 归一化到 5)
     try:
         refresh_sec = max(1, int(_to_float(settings.get("refresh_sec")) or 1))
     except (TypeError, ValueError):
         refresh_sec = 1
+    # 归一化到合法频率集合 {1,5,10}; config 残留 refresh_sec=3 等无效值映射到最近合法值
+    if refresh_sec not in (1, 5, 10):
+        # 就近映射: <=2 ->1, <=5 ->5(覆盖历史 3/4), 其余 ->10
+        refresh_sec = 1 if refresh_sec <= 2 else (5 if refresh_sec <= 5 else 10)
 
     root = tk.Tk()
     root.title("")
@@ -1597,8 +1627,16 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     root.protocol("WM_DELETE_WINDOW", _quit)
 
     # 注意: 以下 header 按钮均用 side="right" 打包, 后打包的更靠左。
-    # 目标左→右顺序: ⚙️设置 → 📌置顶 → ＋新增 → ⏸暂停 → {Ns}频率 → ↺刷新
-    # 故 pack 顺序应为从右到左: refresh_btn → freq_btn → pause_btn → add_btn → top_btn → set_btn
+    # 目标左→右顺序: 📌置顶(最左) → ⚙️设置 → 🔔显示变动 → ＋新增 → ⏸暂停 → {Ns}频率 → ↺刷新
+    # 故 pack 顺序应为从右到左: set_btn → sig_btn → add_btn → pause_btn → freq_btn → refresh_btn → top_btn
+
+    # 窗口置顶开关: 📌 按钮(功能④) —— 置于最左(最后打包)
+    # 注意: 此处 ui 字典尚未定义, 故直接读 settings 默认(与 ui["topmost"] 同源)
+    _top_on = bool(settings.get("topmost", True))
+    top_btn = tk.Label(header, text=(" 📌 " if _top_on else " 📍 "), bg=style["header"],
+                       fg=(style["fg"] if _top_on else style["fg_dim"]),
+                       font=style["FONT_SM"], cursor="hand2")
+    top_btn.bind("<Button-1>", lambda e: _toggle_topmost())
 
     # 立即刷新: ↺ 按钮(点击触发后台立即取数)
     refresh_btn = tk.Label(header, text=" ↺ ", bg=style["header"], fg=style["fg_dim"],
@@ -1606,7 +1644,7 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     refresh_btn.pack(side="right", padx=(0, 2))
     refresh_btn.bind("<Button-1>", lambda e: _force_refresh())
 
-    # 频率控件(1/3/5s 循环)
+    # 频率控件(1/5/10s 循环)
     freq_btn = tk.Label(header, text=f" {refresh_sec}s ", bg=style["header"], fg=style["fg_dim"],
                         font=style["FONT_SM"], cursor="hand2")
     freq_btn.pack(side="right", padx=(0, 2))
@@ -1624,20 +1662,30 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     add_btn.pack(side="right", padx=(0, 2))
     add_btn.bind("<Button-1>", lambda e: _add_stock_dialog())
 
-    # 窗口置顶开关: 📌 按钮(功能④)
-    # 注意: 此处 ui 字典尚未定义, 故直接读 settings 默认(与 ui["topmost"] 同源)
-    _top_on = bool(settings.get("topmost", True))
-    top_btn = tk.Label(header, text=(" 📌 " if _top_on else " 📍 "), bg=style["header"],
-                       fg=(style["fg"] if _top_on else style["fg_dim"]),
+    # 信号提示显隐开关: 🔔/🔕 按钮(功能①, 运行时态, 不落盘) —— 左起第 2 位(紧挨 ⚙️ 右侧)
+    # 注意: 此处 ui 字典尚未定义, 故直接读 settings 默认(与 ui["show_signal"] 同源, 默认 True)
+    _sig_on = bool(settings.get("show_signal", True))
+    sig_btn = tk.Label(header, text=("🔔" if _sig_on else "🔕"),
+                       bg=style["header"], fg=(style["fg"] if _sig_on else style["fg_dim"]),
                        font=style["FONT_SM"], cursor="hand2")
-    top_btn.pack(side="right", padx=(0, 2))
-    top_btn.bind("<Button-1>", lambda e: _toggle_topmost())
+    sig_btn.pack(side="right", padx=(0, 2))
 
-    # 设置面板: ⚙️ 按钮(透明度+灰度+变动提示), 点开实时调节并持久化
+    def _toggle_signal_label():
+        """点击后切换信号显隐, 并同步按钮文案与高亮。"""
+        _toggle_signal()
+        on = ui["show_signal"]
+        sig_btn.config(text=("🔔" if on else "🔕"),
+                       fg=(style["fg"] if on else style["fg_dim"]))
+    sig_btn.bind("<Button-1>", lambda e: _toggle_signal_label())
+
+    # 设置面板: ⚙️ 按钮(透明度+灰度+变动消息), 点开实时调节并持久化
     set_btn = tk.Label(header, text=" ⚙ ", bg=style["header"], fg=style["fg_dim"],
                        font=style["FONT_SM"], cursor="hand2")
     set_btn.pack(side="right", padx=(0, 2))
     set_btn.bind("<Button-1>", lambda e: _open_settings_panel())
+
+    # 📌 置顶按钮最后打包, 使其落在最左端(见上方 header 顺序说明)
+    top_btn.pack(side="right", padx=(0, 2))
 
     drag = {"x": 0, "y": 0}
 
@@ -1652,8 +1700,23 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         w.bind("<ButtonPress-1>", start_drag)
         w.bind("<B1-Motion>", do_drag)
 
+    # ---- 主窗口布局容器: content(顶层 wrapper) 内含 center(中央竖向区) ----
+    # 原 left_pane/right_pane 侧列已移除; 设置/添加面板改为 center 内 status 之下的
+    # 内联面板, 默认隐藏, 由 ⚙️/＋ 切换显隐, 按 header 图标顺序(⚙️上 / ＋下)竖向堆叠。
+    # body/sep/sighead/sigpane/status 以及 settings_inline/add_inline 均为 center 子 Frame。
+    content = tk.Frame(root, bg=style["bg"])
+    content.pack(fill="x")
+    center = tk.Frame(content, bg=style["bg"])         # 中央竖向区
+    center.pack(side="left", fill="both", expand=True)
+
+    # 以下两内联面板为 center 子 Frame, 默认隐藏, 打包于 status 之下(添加面板在设置面板之下)。
+    settings_inline = tk.Frame(center, bg=style["bg"])   # 设置面板(默认隐藏, 置于 status 之下)
+    add_inline = tk.Frame(center, bg=style["bg"])         # 添加面板(默认隐藏, 置于 status 之下)
+    settings_inline.pack_forget()
+    add_inline.pack_forget()
+
     # ---- 行情行 ----
-    body = tk.Frame(root, bg=style["bg"])
+    body = tk.Frame(center, bg=style["bg"])
     body.pack(fill="x")
     rows: Dict[str, tuple] = {}
     quote_frames: Dict[str, "tk.Frame"] = {}
@@ -1823,26 +1886,39 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         set_topmost(root, on)
         status.config(text=("📌 窗口置顶" if on else "📍 取消置顶"))
 
-    def _add_stock_dialog():
-        """自定义『添加自选』模态: 名称模糊搜索 -> 选择 -> 添加(功能①)。
+    # ---- 添加面板: 从 Toplevel 弹窗改为主窗口下方内联展示(功能①) ----
+    add_panel_built = {"done": False}
 
-        复用 style 主题; 搜索走后台线程避免冻结 HUD。最终仍调用 _add_stock(
-        {"code","name"}) (签名不变, 由上层回写 stocks.toml)。无 tkinter 时直接返回。
+    def _add_stock_dialog():
+        """点击 ＋: 切换主窗口下方内联添加面板显隐(原 Toplevel 弹窗已移除)。
+
+        面板控件在首次打开时一次性构建到 add_inline, 之后仅做 pack/pack_forget 切换。
+        无 tkinter 时直接返回。
         """
         if tk is None or root is None:
             return
-        # ---- 模态弹窗 ----
-        dlg = tk.Toplevel(root)
-        dlg.transient(root)
-        dlg.grab_set()
-        dlg.title("添加自选")
-        # 相对主窗口居中(避免飘在桌面左上角); 高度 420→460 给手动输入行留空间
-        root.update_idletasks()
-        dw, dh = 380, 460
-        x = root.winfo_x() + (root.winfo_width() - dw) // 2
-        y = root.winfo_y() + (root.winfo_height() - dh) // 2
-        dlg.geometry(f"{dw}x{dh}+{x}+{y}")
-        dlg.configure(bg=style["bg"])
+        if not add_panel_built["done"]:
+            _build_add_panel()
+            add_panel_built["done"] = True
+        if add_inline.winfo_ismapped():
+            add_inline._close()          # 再次点击 ＋ -> 收起并重置
+        else:
+            add_inline.pack(after=(settings_inline if settings_inline.winfo_ismapped() else status),
+                            fill="x")
+            root.update_idletasks()
+
+    def _build_add_panel():
+        """一次性在 add_inline 中构建设置控件: 显示名/搜索/手动代码/结果列表/添加取消。
+
+        逻辑与原弹窗完全一致: 搜索走腾讯 smartbox(search_stocks) + 后台线程,
+        经 root.after(0, _populate) 回填; 手动代码 _normalize_manual_code 归一化;
+        显示名置于搜索框上方; _on_add/_on_select 回调 + _add_stock 调用。
+        """
+        add_inline.configure(bg=style["bg"])
+
+        # 面板顶部分界线(与信号提示上方一致)
+        add_sep = tk.Frame(add_inline, bg=style["sep"], height=1)
+        add_sep.pack(fill="x", padx=5, pady=2)
 
         # 选中的结果 + 与 listbox index 平行的结果列表(闭包引用, 原地变更无需 nonlocal)
         selected = {"code": None, "name": None}
@@ -1915,44 +1991,59 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
                 code = normalized
             name = name_entry.get().strip() or code
             _add_stock({"code": code, "name": name})
-            dlg.destroy()
+            add_inline._close()
 
         def _on_cancel():
-            dlg.destroy()
+            add_inline._close()
+
+        # 收起面板并重置子控件状态, 避免下次打开残留
+        def _close():
+            add_inline.pack_forget()
+            try:
+                name_entry.delete(0, tk.END)
+                q_entry.delete(0, tk.END)
+                manual_code_entry.delete(0, tk.END)
+                result_lb.delete(0, tk.END)
+                result_lb.insert(tk.END, "输入关键词后点击『搜索』")
+            except Exception:
+                pass
+            selected["code"] = None
+            selected["name"] = None
+            results.clear()
 
         # ---- 控件 ----
         # 显示名(可修改): 置于顶部, 便于搜索选择后直接编辑再『添加』
-        tk.Label(dlg, text="显示名（可修改）",
+        tk.Label(add_inline, text="显示名（可修改）",
                  bg=style["bg"], fg=style["fg_dim"],
                  font=style["FONT_SM"], anchor="w").pack(fill="x", padx=8, pady=(8, 2))
-        name_entry = tk.Entry(dlg, bg=style["bg"], fg=style["fg"], font=style["FONT_SM"])
+        name_entry = tk.Entry(add_inline, bg=style["bg"], fg=style["fg"], font=style["FONT_SM"])
         name_entry.pack(fill="x", padx=8, pady=(0, 4))
 
-        tk.Label(dlg, text="股票名称搜索（模糊匹配）",
+        tk.Label(add_inline, text="股票名称搜索（模糊匹配）",
                  bg=style["bg"], fg=style["fg"],
                  font=style["FONT_SM"], anchor="w").pack(fill="x", padx=8, pady=(8, 2))
 
-        q_entry = tk.Entry(dlg, bg=style["bg"], fg=style["fg"], font=style["FONT_SM"])
+        q_entry = tk.Entry(add_inline, bg=style["bg"], fg=style["fg"], font=style["FONT_SM"])
         q_entry.pack(fill="x", padx=8, pady=(0, 4))
         q_entry.bind("<Return>", lambda e: _do_search())
         q_entry.focus_set()
 
-        tk.Button(dlg, text="搜索", command=_do_search,
+        tk.Button(add_inline, text="搜索", command=_do_search,
                   bg=style["bg"], fg=style["fg"], font=style["FONT_SM"]
                   ).pack(anchor="w", padx=8, pady=(0, 4))
 
         # 功能②: 手动代码输入入口(与搜索选择并存, 不替代搜索流程)
-        tk.Label(dlg, text="代码（手动添加，如 sh600519 / 600519）",
+        tk.Label(add_inline, text="代码（手动添加，如 sh600519 / 600519）",
                  bg=style["bg"], fg=style["fg_dim"],
                  font=style["FONT_SM"], anchor="w").pack(fill="x", padx=8, pady=(0, 2))
-        manual_code_entry = tk.Entry(dlg, bg=style["bg"], fg=style["fg"], font=style["FONT_SM"])
+        manual_code_entry = tk.Entry(add_inline, bg=style["bg"], fg=style["fg"], font=style["FONT_SM"])
         manual_code_entry.pack(fill="x", padx=8, pady=(0, 4))
         manual_code_entry.bind("<Return>", lambda e: _on_add())
 
-        list_frame = tk.Frame(dlg, bg=style["bg"])
+        list_frame = tk.Frame(add_inline, bg=style["bg"])
         list_frame.pack(fill="both", expand=True, padx=8, pady=(0, 4))
         result_lb = tk.Listbox(list_frame, bg=style["bg"], fg=style["fg"],
-                               font=style["FONT_SM"], selectmode=tk.SINGLE)
+                               font=style["FONT_SM"], selectmode=tk.SINGLE, height=8)
         scroll = tk.Scrollbar(list_frame, command=result_lb.yview)
         result_lb.config(yscrollcommand=scroll.set)
         result_lb.pack(side="left", fill="both", expand=True)
@@ -1960,7 +2051,7 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         result_lb.bind("<<ListboxSelect>>", _on_select)
         result_lb.bind("<Double-Button-1>", _on_select)
 
-        btn_row = tk.Frame(dlg, bg=style["bg"])
+        btn_row = tk.Frame(add_inline, bg=style["bg"])
         btn_row.pack(fill="x", padx=8, pady=(4, 8))
         tk.Button(btn_row, text="添加", command=_on_add,
                   bg=style["bg"], fg=style["fg"], font=style["FONT_SM"]
@@ -1970,6 +2061,8 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
                   ).pack(side="left")
 
         result_lb.insert(tk.END, "输入关键词后点击『搜索』")
+        # 暴露「收起 + 重置」句柄给外层 toggle 与内部回调使用
+        add_inline._close = _close
 
     def _add_stock(parsed):
         """把解析后的股票加入内存列表 + GUI + 回写 stocks.toml(功能①)。"""
@@ -2037,20 +2130,20 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     _refresh_move_buttons()
 
     # ---- 分隔线 + 下半部分: 信号提示 ----
-    sep = tk.Frame(root, bg=style["sep"], height=1)
+    sep = tk.Frame(center, bg=style["sep"], height=1)
     sep.pack(fill="x", padx=5, pady=2)
-    sighead = tk.Label(root, text="信号提示", bg=style["bg"], fg=style["fg_dim"],
+    sighead = tk.Label(center, text="信号提示", bg=style["bg"], fg=style["fg_dim"],
                        font=style["FONT_SM"], anchor="w")
     sighead.pack(fill="x", padx=5, pady=(0, 1))
 
-    sigpane = tk.Frame(root, bg=style["bg"])
+    sigpane = tk.Frame(center, bg=style["bg"])
     sigpane.pack(fill="x")
     sig_rows: Dict[str, tuple] = {}
     for st in stocks:
         _build_sig_row(st)
 
     # ---- 底部状态 ----
-    status = tk.Label(root, text="连接中…", bg=style["bg"], fg=style["fg_dim"], font=style["FONT_SM"], anchor="w")
+    status = tk.Label(center, text="连接中…", bg=style["bg"], fg=style["fg_dim"], font=style["FONT_SM"], anchor="w")
     status.pack(fill="x", padx=3, pady=(0, 1))
 
     # 初始定位到右上角
@@ -2079,7 +2172,7 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
 
     def _cycle_freq():
         cur = state["refresh_sec"]
-        nxt = {1: 3, 3: 5, 5: 10, 10: 1}.get(cur, 1)
+        nxt = {1: 5, 3: 5, 5: 10, 10: 1}.get(cur, 1)
         # 切到 1 秒刷新频率极可能触发免费源限流/封禁, 需用户确认
         if refresh_requires_ban_warning(nxt):
             ok = messagebox.askyesno(
@@ -2125,24 +2218,39 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         root.update_idletasks()
 
     # ---- 设置面板: 透明度 + 灰度(实时生效 + 持久化) ----
+    # ---- 设置面板: 从 Toplevel 弹窗改为主窗口下方内联展示(透明度 + 灰度, 实时生效 + 持久化) ----
+    settings_panel_built = {"done": False}
+
     def _open_settings_panel():
-        """打开设置面板 Toplevel: 透明度滑块 + 灰度滑块, 实时生效 + 持久化。"""
+        """点击 ⚙️: 切换主窗口下方内联设置面板显隐(原 Toplevel 弹窗已移除)。
+
+        面板控件在首次打开时一次性构建到 settings_inline, 之后仅做 pack/pack_forget 切换。
+        无 tkinter 时直接返回。
+        """
         if tk is None:
             return
-        panel = tk.Toplevel(root)
-        panel.title("设置")
-        panel.transient(root)
-        panel.resizable(False, False)
-        panel.configure(bg=style["bg"])
+        if not settings_panel_built["done"]:
+            _build_settings_panel()
+            settings_panel_built["done"] = True
+        if settings_inline.winfo_ismapped():
+            settings_inline.pack_forget()          # 再次点击 ⚙️ -> 收起
+        else:
+            settings_inline.pack(after=status, fill="x")
+            root.update_idletasks()
 
-        # 定位在 root 附近(其下方)
-        x = root.winfo_x() + 10
-        y = root.winfo_y() + root.winfo_height() + 5
-        panel.geometry(f"+{x}+{y}")
+    def _build_settings_panel():
+        """一次性在 settings_inline 中构建设置控件: 透明度/灰度滑块 + 变动消息开关。
+
+        布局/回调逻辑与原弹窗一致; 设置实时生效且自动持久化(alpha/grayness 拖动即存),
+        面板由 ⚙️ 切换显隐, 无独立保存/取消按钮(显示变动开关已还原回 header)。
+        """
+        # 面板顶部分界线(与信号提示上方一致)
+        settings_sep = tk.Frame(settings_inline, bg=style["sep"], height=1)
+        settings_sep.pack(fill="x", padx=5, pady=2)
 
         def make_slider(label_text, from_, to_, default_val, resolution, on_change):
             """创建一行: 标签 + 滑块 + 数值显示。"""
-            frm = tk.Frame(panel, bg=style["bg"])
+            frm = tk.Frame(settings_inline, bg=style["bg"])
             frm.pack(fill="x", padx=12, pady=6)
             lbl = tk.Label(frm, text=label_text, bg=style["bg"], fg=style["fg"],
                           font=style["FONT_SM"], anchor="w", width=10)
@@ -2158,29 +2266,14 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
 
         # --- 透明度 ---
         cur_alpha = settings.get("float_alpha", ALPHA_DEFAULT)
-        alpha_var, _ = make_slider(
+        make_slider(
             "透明度", 0.30, 1.0, float(cur_alpha), 0.01,
             lambda val: _apply_alpha(val))
         # --- 灰度 ---
         cur_gray = max(0.0, min(1.0, float(settings.get("grayness") or 0.0)))
-        gray_var, _ = make_slider(
+        make_slider(
             "灰度", 0.0, 1.0, cur_gray, 0.05,
             lambda val: _apply_grayness(val))
-
-        # --- 变动提示开关(功能①, 运行时态, 不落盘) ---
-        # 仅触发 _toggle_signal() 并刷新自身文案, 整块显隐逻辑由 _toggle_signal 负责
-        sig_toggle = tk.Button(
-            panel, text=("🔔 显示变动" if ui.get("show_signal", True) else "🔕 隐藏变动"),
-            bg=style["bg"], fg=style["fg"], font=style["FONT_SM"],
-            cursor="hand2", relief="flat", padx=12, pady=4)
-
-        def _toggle_signal_label():
-            """点击后切换信号显隐, 并同步按钮文案。"""
-            _toggle_signal()
-            sig_toggle.config(
-                text=("🔔 显示变动" if ui["show_signal"] else "🔕 隐藏变动"))
-        sig_toggle.config(command=_toggle_signal_label)
-        sig_toggle.pack(pady=6, padx=12, anchor="w")
 
         # --- 变动消息提示开关(控制 OS 弹框+声音, 持久化) ---
         def _toggle_notify():
@@ -2192,37 +2285,49 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             notify_toggle.config(
                 text=("📢 变动消息：开" if on else "🔇 变动消息：关"))
         notify_toggle = tk.Button(
-            panel,
+            settings_inline,
             text=("📢 变动消息：开" if notifier.enabled else "🔇 变动消息：关"),
             bg=style["bg"], fg=style["fg"], font=style["FONT_SM"],
             cursor="hand2", relief="flat", padx=12, pady=4)
         notify_toggle.config(command=_toggle_notify)
         notify_toggle.pack(pady=6, padx=12, anchor="w")
 
-        # 关闭按钮
-        close = tk.Button(panel, text="完成", command=panel.destroy,
-                         bg=style["header"], fg=style["fg"],
-                         font=style["FONT_SM"], cursor="hand2",
-                         relief="flat", padx=16, pady=4)
-        close.pack(pady=(4, 8))
+    # 重入保护标志(dict 避免 nonlocal 复杂度): 在 macOS Tk 上, _reapply_style 末尾的
+    # root.update_idletasks() 会从当前活动 Scale 的 -command 回调内部重入事件循环,
+    # 再次触发同一滑块 command, 形成无限嵌套 -> RecursionError。alpha/grayness 共用
+    # 同一守卫, 任一滑块回调重入时直接跳过实质工作, 递归被彻底切断。
+    _style_busy = {"v": False}
 
     def _apply_alpha(val: float):
-        """实时应用透明度(alpha 边界 clamp 在 [0.30, 1.0])。"""
-        val = max(0.30, min(1.0, val))            # 安全边界
-        root.attributes("-alpha", val)
-        nonlocal alpha
-        alpha = val
-        settings["float_alpha"] = val
-        _save_config_key("float_alpha", val)
+        """实时应用透明度(alpha 边界 clamp 在 [0.30, 1.0])。
+
+        含重入保护: 与 _apply_grayness 共用 _style_busy 守卫, 避免 macOS Tk 在
+        update_idletasks 中重触发 Scale command 导致递归(稳健性一致处理)。
+        """
+        def _work():
+            v = max(0.30, min(1.0, val))           # 安全边界
+            root.attributes("-alpha", v)
+            nonlocal alpha
+            alpha = v
+            settings["float_alpha"] = v
+            _save_config_key("float_alpha", v)
+        _run_with_guard(_style_busy, _work)
 
     def _apply_grayness(val: float):
-        """实时应用灰度(重算 style 并全量重刷 widget 配色)。"""
-        val = max(0.0, min(1.0, val))
-        settings["grayness"] = val
-        nonlocal style
-        style = build_style(settings)             # 重算含新灰度的完整样式字典
-        _reapply_style()                          # 全量重刷配色
-        _save_config_key("grayness", val)
+        """实时应用灰度(重算 style 并全量重刷 widget 配色)。
+
+        含重入保护: 避免 macOS Tk 在 update_idletasks 中重触发 Scale command 导致
+        无限递归(RecursionError)。嵌套触发的 _apply_grayness 因 _style_busy 标志为
+        True 被 _run_with_guard 跳过, 由外层调用完成样式刷新并复位标志。
+        """
+        def _work():
+            v = max(0.0, min(1.0, val))
+            settings["grayness"] = v
+            nonlocal style
+            style = build_style(settings)          # 重算含新灰度的完整样式字典
+            _reapply_style()                       # 全量重刷配色
+            _save_config_key("grayness", v)
+        _run_with_guard(_style_busy, _work)
 
     def _reapply_style():
         """用当前 style 字典重刷所有可见 widget 配色(灰度变更后调用)。
@@ -2238,6 +2343,13 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         root.configure(bg=style["bg"])
         header.configure(bg=style["header"])
         htitle.configure(bg=style["header"], fg=style["fg_dim"])
+        # 容器背景随灰度刷新(content/center 始终存在; 两内联面板仅在已构建后刷新)
+        content.configure(bg=style["bg"])
+        center.configure(bg=style["bg"])
+        if settings_panel_built.get("done"):
+            settings_inline.configure(bg=style["bg"])
+        if add_panel_built.get("done"):
+            add_inline.configure(bg=style["bg"])
         status.configure(bg=style["bg"], fg=style["fg_dim"])
         sighead.configure(bg=style["bg"], fg=style["fg_dim"])
         sep.configure(bg=style["sep"])
