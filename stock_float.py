@@ -1541,7 +1541,7 @@ def build_style(settings: dict) -> dict:
         "down": desaturate(_hex_color(settings.get("float_down_color"), pal["down"]), grayness),
         "flat": pal["flat"], "dl": pal["dl"], "header": pal["header"], "sep": pal["sep"],
         "sig_colors": sig_colors,
-        "FONT": (font, size), "FONT_SM": (font, max(5, size - 1)), "ROW_H": 16,
+        "FONT": (font, size), "FONT_SM": (font, max(5, size - 1)), "ROW_H": 14,
     }
 
 
@@ -1619,7 +1619,7 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     header.pack(fill="x")
     htitle = tk.Label(header, text="  行情", bg=style["header"], fg=style["fg_dim"],
                       font=style["FONT_SM"], anchor="w")
-    htitle.pack(side="left", padx=(3, 0))
+    htitle.pack(side="left", padx=(2, 0))
 
     def _quit():
         """静默直接退出, 不弹任何确认框。"""
@@ -1641,25 +1641,25 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     # 立即刷新: ↺ 按钮(点击触发后台立即取数)
     refresh_btn = tk.Label(header, text=" ↺ ", bg=style["header"], fg=style["fg_dim"],
                            font=style["FONT_SM"], cursor="hand2")
-    refresh_btn.pack(side="right", padx=(0, 2))
+    refresh_btn.pack(side="right", padx=(0, 1))
     refresh_btn.bind("<Button-1>", lambda e: _force_refresh())
 
     # 频率控件(1/5/10s 循环)
     freq_btn = tk.Label(header, text=f" {refresh_sec}s ", bg=style["header"], fg=style["fg_dim"],
                         font=style["FONT_SM"], cursor="hand2")
-    freq_btn.pack(side="right", padx=(0, 2))
+    freq_btn.pack(side="right", padx=(0, 1))
     freq_btn.bind("<Button-1>", lambda e: _cycle_freq())
 
     # 暂停/继续按钮
     pause_btn = tk.Label(header, text=" ⏸ ", bg=style["header"], fg=style["fg_dim"],
                          font=style["FONT_SM"], cursor="hand2")
-    pause_btn.pack(side="right", padx=(0, 2))
+    pause_btn.pack(side="right", padx=(0, 1))
     pause_btn.bind("<Button-1>", lambda e: _toggle_pause())
 
     # 运行时增删自选: ＋ 按钮(功能①)
     add_btn = tk.Label(header, text=" ＋ ", bg=style["header"], fg=style["fg_dim"],
                        font=style["FONT_SM"], cursor="hand2")
-    add_btn.pack(side="right", padx=(0, 2))
+    add_btn.pack(side="right", padx=(0, 1))
     add_btn.bind("<Button-1>", lambda e: _add_stock_dialog())
 
     # 信号提示显隐开关: 🔔/🔕 按钮(功能①, 运行时态, 不落盘) —— 左起第 2 位(紧挨 ⚙️ 右侧)
@@ -1668,7 +1668,7 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     sig_btn = tk.Label(header, text=("🔔" if _sig_on else "🔕"),
                        bg=style["header"], fg=(style["fg"] if _sig_on else style["fg_dim"]),
                        font=style["FONT_SM"], cursor="hand2")
-    sig_btn.pack(side="right", padx=(0, 2))
+    sig_btn.pack(side="right", padx=(0, 1))
 
     def _toggle_signal_label():
         """点击后切换信号显隐, 并同步按钮文案与高亮。"""
@@ -1681,11 +1681,11 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     # 设置面板: ⚙️ 按钮(透明度+灰度+变动消息), 点开实时调节并持久化
     set_btn = tk.Label(header, text=" ⚙ ", bg=style["header"], fg=style["fg_dim"],
                        font=style["FONT_SM"], cursor="hand2")
-    set_btn.pack(side="right", padx=(0, 2))
+    set_btn.pack(side="right", padx=(0, 1))
     set_btn.bind("<Button-1>", lambda e: _open_settings_panel())
 
     # 📌 置顶按钮最后打包, 使其落在最左端(见上方 header 顺序说明)
-    top_btn.pack(side="right", padx=(0, 2))
+    top_btn.pack(side="right", padx=(0, 1))
 
     drag = {"x": 0, "y": 0}
 
@@ -1726,8 +1726,8 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     # 手动排序: 记录每行行情行右侧的上移/下移箭头部件, 用于边界灰显
     move_btns: Dict[str, tuple] = {}
     ui = {"topmost": bool(settings.get("topmost", True)), "show_signal": True}
-    QUOTE_PACK = dict(fill="x", padx=3, pady=1)
-    SIG_PACK = dict(fill="x", padx=5, pady=(0, 1))
+    QUOTE_PACK = dict(fill="x", padx=2, pady=0)
+    SIG_PACK = dict(fill="x", padx=4, pady=(0, 0))
 
     # ---- 运行时增删自选 / 信号行可见性控制: 行构建与 UI 回调 ----
     # 以下嵌套函数引用的 body/sigpane/status 等均在 run_hud 后续创建,
@@ -1739,27 +1739,27 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         f.pack(**QUOTE_PACK)
         sig_l = tk.Label(f, text="●", bg=style["bg"], fg=style["flat"], font=style["FONT"], width=2, anchor="w")
         sig_l.pack(side="left")
-        name_l = tk.Label(f, text=st["name"], bg=style["bg"], fg=style["fg"], font=style["FONT"], width=14, anchor="w")
+        name_l = tk.Label(f, text=st["name"], bg=style["bg"], fg=style["fg"], font=style["FONT"], width=9, anchor="w")
         name_l.pack(side="left")
-        price_l = tk.Label(f, text="--", bg=style["bg"], fg=style["fg"], font=style["FONT"], width=5, anchor="e")
-        price_l.pack(side="left", padx=(0, 4))
+        price_l = tk.Label(f, text="--", bg=style["bg"], fg=style["fg"], font=style["FONT"], width=4, anchor="e")
+        price_l.pack(side="left", padx=(0, 3))
         chg_l = tk.Label(f, text="", bg=style["bg"], fg=style["flat"], font=style["FONT"], width=6, anchor="e")
-        chg_l.pack(side="left")
-        dl_l = tk.Label(f, text="", bg=style["bg"], fg=style["dl"], font=style["FONT_SM"], width=3, anchor="w")
+        chg_l.pack(side="left", padx=(3, 0))
+        dl_l = tk.Label(f, text="", bg=style["bg"], fg=style["dl"], font=style["FONT_SM"], width=2, anchor="w")
         dl_l.pack(side="left")
         # 可见删除按钮(功能①): 先 pack 故位于最右角; 左键直接删除。
-        del_btn = tk.Label(f, text=" 🗑 ", bg=style["bg"], fg=style["fg_dim"],
+        del_btn = tk.Label(f, text="🗑", bg=style["bg"], fg=style["fg_dim"],
                            font=style["FONT_SM"], cursor="hand2")
         del_btn.bind("<Button-1>", lambda e, c=code: _confirm_remove(c))
-        del_btn.pack(side="right", padx=(0, 2))
+        del_btn.pack(side="right", padx=(0, 1))
         # 手动排序: 上移/下移箭头(位于删除按钮左侧, 紧贴其左)
-        up_btn = tk.Label(f, text=" ▲ ", bg=style["bg"], fg=style["fg_dim"],
+        up_btn = tk.Label(f, text="▲", bg=style["bg"], fg=style["fg_dim"],
                           font=style["FONT_SM"], cursor="hand2")
-        up_btn.pack(side="right", padx=(0, 1))
+        up_btn.pack(side="right", padx=(0, 0))
         up_btn.bind("<Button-1>", lambda e, c=code: _move_stock(c, "up"))
-        down_btn = tk.Label(f, text=" ▼ ", bg=style["bg"], fg=style["fg_dim"],
+        down_btn = tk.Label(f, text="▼", bg=style["bg"], fg=style["fg_dim"],
                             font=style["FONT_SM"], cursor="hand2")
-        down_btn.pack(side="right", padx=(0, 1))
+        down_btn.pack(side="right", padx=(0, 0))
         down_btn.bind("<Button-1>", lambda e, c=code: _move_stock(c, "down"))
         move_btns[code] = (up_btn, down_btn)
         rows[code] = (sig_l, name_l, price_l, chg_l, dl_l)
@@ -1918,7 +1918,7 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
 
         # 面板顶部分界线(与信号提示上方一致)
         add_sep = tk.Frame(add_inline, bg=style["sep"], height=1)
-        add_sep.pack(fill="x", padx=5, pady=2)
+        add_sep.pack(fill="x", padx=4, pady=1)
 
         # 选中的结果 + 与 listbox index 平行的结果列表(闭包引用, 原地变更无需 nonlocal)
         selected = {"code": None, "name": None}
@@ -2131,10 +2131,10 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
 
     # ---- 分隔线 + 下半部分: 信号提示 ----
     sep = tk.Frame(center, bg=style["sep"], height=1)
-    sep.pack(fill="x", padx=5, pady=2)
+    sep.pack(fill="x", padx=4, pady=1)
     sighead = tk.Label(center, text="信号提示", bg=style["bg"], fg=style["fg_dim"],
                        font=style["FONT_SM"], anchor="w")
-    sighead.pack(fill="x", padx=5, pady=(0, 1))
+    sighead.pack(fill="x", padx=4, pady=(0, 0))
 
     sigpane = tk.Frame(center, bg=style["bg"])
     sigpane.pack(fill="x")
@@ -2144,7 +2144,7 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
 
     # ---- 底部状态 ----
     status = tk.Label(center, text="连接中…", bg=style["bg"], fg=style["fg_dim"], font=style["FONT_SM"], anchor="w")
-    status.pack(fill="x", padx=3, pady=(0, 1))
+    status.pack(fill="x", padx=2, pady=(0, 0))
 
     # 初始定位到右上角
     root.update_idletasks()
@@ -2195,9 +2195,9 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         # winfo_ismapped 守卫避免重复 pack; before=status 维持原始上下顺序(否则布局错乱)
         if on:
             if not sep.winfo_ismapped():
-                sep.pack(fill="x", padx=5, pady=2, before=status)
+                sep.pack(fill="x", padx=4, pady=1, before=status)
             if not sighead.winfo_ismapped():
-                sighead.pack(fill="x", padx=5, pady=(0, 1), before=status)
+                sighead.pack(fill="x", padx=4, pady=(0, 0), before=status)
             if not sigpane.winfo_ismapped():
                 sigpane.pack(fill="x", before=status)
         else:
@@ -2246,22 +2246,22 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         """
         # 面板顶部分界线(与信号提示上方一致)
         settings_sep = tk.Frame(settings_inline, bg=style["sep"], height=1)
-        settings_sep.pack(fill="x", padx=5, pady=2)
+        settings_sep.pack(fill="x", padx=4, pady=1)
 
         def make_slider(label_text, from_, to_, default_val, resolution, on_change):
             """创建一行: 标签 + 滑块 + 数值显示。"""
             frm = tk.Frame(settings_inline, bg=style["bg"])
-            frm.pack(fill="x", padx=12, pady=6)
+            frm.pack(fill="x", padx=8, pady=4)
             lbl = tk.Label(frm, text=label_text, bg=style["bg"], fg=style["fg"],
-                          font=style["FONT_SM"], anchor="w", width=10)
+                          font=style["FONT_SM"], anchor="w", width=6)
             lbl.pack(side="left")
             var = tk.DoubleVar(value=default_val)
             scl = tk.Scale(frm, from_=from_, to=to_, resolution=resolution,
                           orient="horizontal", variable=var,
                           bg=style["bg"], fg=style["fg"],
                           highlightthickness=0, troughcolor=style["header"],
-                          length=180, command=lambda v, cb=on_change: cb(float(v)))
-            scl.pack(side="left", fill="x", expand=True, padx=(6, 0))
+                          command=lambda v, cb=on_change: cb(float(v)))
+            scl.pack(side="left", fill="x", expand=True, padx=(4, 0))
             return var, scl
 
         # --- 透明度 ---
@@ -2290,7 +2290,7 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             bg=style["bg"], fg=style["fg"], font=style["FONT_SM"],
             cursor="hand2", relief="flat", padx=12, pady=4)
         notify_toggle.config(command=_toggle_notify)
-        notify_toggle.pack(pady=6, padx=12, anchor="w")
+        notify_toggle.pack(pady=4, padx=8, anchor="w")
 
     # 重入保护标志(dict 避免 nonlocal 复杂度): 在 macOS Tk 上, _reapply_style 末尾的
     # root.update_idletasks() 会从当前活动 Scale 的 -command 回调内部重入事件循环,
