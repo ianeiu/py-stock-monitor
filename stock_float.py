@@ -1627,16 +1627,9 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     root.protocol("WM_DELETE_WINDOW", _quit)
 
     # 注意: 以下 header 按钮均用 side="right" 打包, 后打包的更靠左。
-    # 目标左→右顺序: 📌置顶(最左) → ⚙️设置 → 🔔显示变动 → ＋新增 → ⏸暂停 → {Ns}频率 → ↺刷新
-    # 故 pack 顺序应为从右到左: set_btn → sig_btn → add_btn → pause_btn → freq_btn → refresh_btn → top_btn
-
-    # 窗口置顶开关: 📌 按钮(功能④) —— 置于最左(最后打包)
-    # 注意: 此处 ui 字典尚未定义, 故直接读 settings 默认(与 ui["topmost"] 同源)
-    _top_on = bool(settings.get("topmost", True))
-    top_btn = tk.Label(header, text=(" 📌 " if _top_on else " 📍 "), bg=style["header"],
-                       fg=(style["fg"] if _top_on else style["fg_dim"]),
-                       font=style["FONT_SM"], cursor="hand2")
-    top_btn.bind("<Button-1>", lambda e: _toggle_topmost())
+    # 目标左→右顺序: ⚙️设置(最左) → 🔔显示变动 → ＋新增 → ⏸暂停 → {Ns}频率 → ↺刷新
+    # 故 pack 顺序应为从右到左: set_btn → sig_btn → add_btn → pause_btn → freq_btn → refresh_btn
+    # (窗口置顶 📌 已并入设置面板, header 不再保留置顶按钮)
 
     # 立即刷新: ↺ 按钮(点击触发后台立即取数)
     refresh_btn = tk.Label(header, text=" ↺ ", bg=style["header"], fg=style["fg_dim"],
@@ -1684,9 +1677,6 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     set_btn.pack(side="right", padx=(0, 1))
     set_btn.bind("<Button-1>", lambda e: _open_settings_panel())
 
-    # 📌 置顶按钮最后打包, 使其落在最左端(见上方 header 顺序说明)
-    top_btn.pack(side="right", padx=(0, 1))
-
     drag = {"x": 0, "y": 0}
 
     def start_drag(e):
@@ -1725,6 +1715,8 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     last_sig_change: Dict[str, float] = {}
     # 手动排序: 记录每行行情行右侧的上移/下移箭头部件, 用于边界灰显
     move_btns: Dict[str, tuple] = {}
+    # 删除按钮引用(供「隐藏删除」开关按需 pack_forget/重 pack)
+    del_btns: Dict[str, "tk.Label"] = {}
     ui = {"topmost": bool(settings.get("topmost", True)), "show_signal": True}
     QUOTE_PACK = dict(fill="x", padx=2, pady=0)
     SIG_PACK = dict(fill="x", padx=4, pady=(0, 0))
@@ -1752,14 +1744,24 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
                            font=style["FONT_SM"], cursor="hand2")
         del_btn.bind("<Button-1>", lambda e, c=code: _confirm_remove(c))
         del_btn.pack(side="right", padx=(0, 1))
+        # 记录原始文本/内边距, 供「宽度折叠」显隐方案还原(见 _apply_row_tools_visibility)
+        del_btn._orig_text = del_btn.cget("text")   # "🗑"
+        del_btn._orig_padx = del_btn.cget("padx")   # (0, 1)
+        del_btns[code] = del_btn
         # 手动排序: 上移/下移箭头(位于删除按钮左侧, 紧贴其左)
         up_btn = tk.Label(f, text="▲", bg=style["bg"], fg=style["fg_dim"],
                           font=style["FONT_SM"], cursor="hand2")
         up_btn.pack(side="right", padx=(0, 0))
+        # 记录原始文本/内边距, 供「宽度折叠」显隐方案还原
+        up_btn._orig_text = up_btn.cget("text")   # "▲"
+        up_btn._orig_padx = up_btn.cget("padx")   # (0, 0)
         up_btn.bind("<Button-1>", lambda e, c=code: _move_stock(c, "up"))
         down_btn = tk.Label(f, text="▼", bg=style["bg"], fg=style["fg_dim"],
                             font=style["FONT_SM"], cursor="hand2")
         down_btn.pack(side="right", padx=(0, 0))
+        # 记录原始文本/内边距, 供「宽度折叠」显隐方案还原
+        down_btn._orig_text = down_btn.cget("text")   # "▼"
+        down_btn._orig_padx = down_btn.cget("padx")   # (0, 0)
         down_btn.bind("<Button-1>", lambda e, c=code: _move_stock(c, "down"))
         move_btns[code] = (up_btn, down_btn)
         rows[code] = (sig_l, name_l, price_l, chg_l, dl_l)
@@ -1780,8 +1782,38 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             if not btns:
                 continue
             up_btn, down_btn = btns
+            # 若「隐藏排序」开启, 箭头已被 pack_forget, 跳过灰显配置(避免对隐藏 widget 无谓操作)。
+            # 注意: 不依赖 winfo_ismapped()(macOS Tk 上该值不可靠, 会导致永远跳过)。
+            if bool(settings.get("hide_sort", False)):
+                continue
             up_btn.config(fg=(style["bg"] if i == 0 else style["fg_dim"]))
             down_btn.config(fg=(style["bg"] if i == n - 1 else style["fg_dim"]))
+
+    def _apply_row_tools_visibility():
+        """按 settings 的 hide_sort/hide_del 即时显隐行情行的排序箭头与删除按钮。
+
+        采用「宽度折叠」而非 pack_forget/pack: 隐藏时清文本+宽度0+内边距0(水平空间塌缩为0),
+        显示时还原原始文本/内边距。macOS Tk 上反复 pack_forget/pack 偶发「第二次隐藏失效」,
+        此方案不触发几何抖动, 对任意次数 toggle 幂等稳健。
+        """
+        hide_sort = bool(settings.get("hide_sort", False))
+        hide_del = bool(settings.get("hide_del", False))
+        for code, (up_btn, down_btn) in move_btns.items():
+            for w in (up_btn, down_btn):
+                if hide_sort:
+                    w.config(text="", width=0, padx=0)
+                else:
+                    w.config(text=w._orig_text, width=0, padx=w._orig_padx)
+        for code, del_btn in del_btns.items():
+            if hide_del:
+                del_btn.config(text="", width=0, padx=0)
+            else:
+                del_btn.config(text=del_btn._orig_text, width=0, padx=del_btn._orig_padx)
+        # 运行时关闭「隐藏排序」后, 立即刷新首行 up / 末行 down 的边界灰显。
+        # 不依赖 winfo_ismapped, 且 _refresh_move_buttons 不回调本函数, 故无递归风险。
+        if not hide_sort:
+            _refresh_move_buttons()
+        root.update_idletasks()
 
     def _move_stock(code, direction):
         """上移/下移一只股票(自定义手动排序)。
@@ -1878,11 +1910,13 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             menu.grab_release()
 
     def _toggle_topmost():
-        """切换窗口置顶(always-on-top)(功能④)。用户点击 header 按钮, 本就在主线程, 直接同步调用。"""
+        """切换窗口置顶(always-on-top)(功能④)。
+
+        置顶开关已并入设置面板(由 top_panel_toggle 调用), header 不再保留 📌 按钮。
+        本函数只负责状态翻转 + 真正置顶 + 状态栏文案, 不再触碰任何 header 按钮。
+        """
         ui["topmost"] = not ui["topmost"]
         on = ui["topmost"]
-        top_btn.config(text=("📌" if on else "📍"),
-                       fg=(style["fg"] if on else style["fg_dim"]))
         set_topmost(root, on)
         status.config(text=("📌 窗口置顶" if on else "📍 取消置顶"))
 
@@ -2073,6 +2107,8 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         stocks.append(parsed)
         warm_klines([parsed])
         _build_quote_row(parsed)
+        # 新加的行立即按当前隐藏开关显隐排序/删除按钮
+        _apply_row_tools_visibility()
         _build_sig_row(parsed)
         last_sig_change[code] = time.time()   # 立即可见(无论过滤是否开启)
         row_vis[code] = True
@@ -2128,6 +2164,8 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         _build_quote_row(st)
     # 初始同步上移/下移箭头灰显(首行 up / 末行 down 禁用)
     _refresh_move_buttons()
+    # 启动即按 config 的隐藏设置生效(隐藏排序/删除按钮)
+    _apply_row_tools_visibility()
 
     # ---- 分隔线 + 下半部分: 信号提示 ----
     sep = tk.Frame(center, bg=style["sep"], height=1)
@@ -2275,6 +2313,12 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             "灰度", 0.0, 1.0, cur_gray, 0.05,
             lambda val: _apply_grayness(val))
 
+        # --- 4 个开关: 2 行 2 列网格, 紧凑布局 ---
+        toggles_grid = tk.Frame(settings_inline, bg=style["bg"])
+        toggles_grid.pack(fill="x", padx=8, pady=4)
+        toggles_grid.columnconfigure(0, weight=1)
+        toggles_grid.columnconfigure(1, weight=1)
+
         # --- 变动消息提示开关(控制 OS 弹框+声音, 持久化) ---
         def _toggle_notify():
             on = not notifier.enabled
@@ -2285,12 +2329,79 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             notify_toggle.config(
                 text=("📢 变动消息：开" if on else "🔇 变动消息：关"))
         notify_toggle = tk.Button(
-            settings_inline,
+            toggles_grid,
             text=("📢 变动消息：开" if notifier.enabled else "🔇 变动消息：关"),
             bg=style["bg"], fg=style["fg"], font=style["FONT_SM"],
-            cursor="hand2", relief="flat", padx=12, pady=4)
+            cursor="hand2", relief="flat", padx=6, pady=2)
         notify_toggle.config(command=_toggle_notify)
-        notify_toggle.pack(pady=4, padx=8, anchor="w")
+        notify_toggle.grid(row=0, column=1, padx=4, pady=4, sticky="ew")
+
+        # --- 窗口置顶开关(与 header 📌 按钮同源, 复用 _toggle_topmost) ---
+        def _toggle_topmost_panel():
+            _toggle_topmost()
+            on = ui["topmost"]
+            top_panel_toggle.config(
+                text=("📌 窗口置顶：开" if on else "📍 窗口置顶：关"))
+        top_panel_toggle = tk.Button(
+            toggles_grid,
+            text=("📌 窗口置顶：开" if ui["topmost"] else "📍 窗口置顶：关"),
+            bg=style["bg"], fg=style["fg"], font=style["FONT_SM"],
+            cursor="hand2", relief="flat", padx=6, pady=2)
+        top_panel_toggle.config(command=_toggle_topmost_panel)
+        top_panel_toggle.grid(row=0, column=0, padx=4, pady=4, sticky="ew")
+
+        # --- 隐藏排序功能开关(持久化 hide_sort) ---
+        def _toggle_hide_sort():
+            new = not bool(settings.get("hide_sort", False))
+            settings["hide_sort"] = new
+            _save_config_key("hide_sort", new)
+            hide_sort_toggle.config(
+                text=("🙈 隐藏排序：开" if new else "👀 显示排序：关"))
+            _apply_row_tools_visibility()
+        hide_sort_toggle = tk.Button(
+            toggles_grid,
+            text=("🙈 隐藏排序：开" if settings.get("hide_sort", False) else "👀 显示排序：关"),
+            bg=style["bg"], fg=style["fg"], font=style["FONT_SM"],
+            cursor="hand2", relief="flat", padx=6, pady=2)
+        hide_sort_toggle.config(command=_toggle_hide_sort)
+        hide_sort_toggle.grid(row=1, column=0, padx=4, pady=4, sticky="ew")
+
+        # --- 隐藏删除功能开关(持久化 hide_del) ---
+        def _toggle_hide_del():
+            new = not bool(settings.get("hide_del", False))
+            settings["hide_del"] = new
+            _save_config_key("hide_del", new)
+            hide_del_toggle.config(
+                text=("🙈 隐藏删除：开" if new else "👀 显示删除：关"))
+            _apply_row_tools_visibility()
+        hide_del_toggle = tk.Button(
+            toggles_grid,
+            text=("🙈 隐藏删除：开" if settings.get("hide_del", False) else "👀 显示删除：关"),
+            bg=style["bg"], fg=style["fg"], font=style["FONT_SM"],
+            cursor="hand2", relief="flat", padx=6, pady=2)
+        hide_del_toggle.config(command=_toggle_hide_del)
+        hide_del_toggle.grid(row=1, column=1, padx=4, pady=4, sticky="ew")
+
+        def _close_settings():
+            """点击收起: 隐藏设置面板并刷新几何。
+
+            用 pack_forget + update_idletasks 收起(macOS 上显隐后须刷新几何,
+            否则隐藏不生效/粘住)。若添加面板(add_inline)正打开且曾挂在设置面板
+            之后, 一并重排回 status 之后, 避免折叠顺序错乱。
+            """
+            settings_inline.pack_forget()
+            if add_inline is not None and add_inline.winfo_ismapped():
+                add_inline.pack_forget()
+                add_inline.pack(after=status, fill="x")
+            root.update_idletasks()
+
+        collapse_btn = tk.Button(
+            settings_inline,
+            text="▾ 收起设置",
+            bg=style["bg"], fg=style["fg_dim"], font=style["FONT_SM"],
+            cursor="hand2", relief="flat", padx=8, pady=3,
+            command=_close_settings)
+        collapse_btn.pack(pady=(6, 2), padx=8, anchor="e")   # 右对齐, 收起入口
 
     # 重入保护标志(dict 避免 nonlocal 复杂度): 在 macOS Tk 上, _reapply_style 末尾的
     # root.update_idletasks() 会从当前活动 Scale 的 -command 回调内部重入事件循环,
@@ -2369,11 +2480,8 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             sbb.configure(fg=style["fg_dim"])
             # sdot 语义色保持 sig_colors(由刷新循环按信号着色, 此处不动)
         # header 按钮(统一底色 + dim 高亮; 特殊高亮由各 toggle 自管)
-        for btn in (freq_btn, pause_btn, add_btn, top_btn, set_btn):
+        for btn in (freq_btn, pause_btn, add_btn, set_btn):
             btn.configure(bg=style["header"], fg=style["fg_dim"])
-        # 按钮特殊高亮恢复
-        if ui.get("topmost"):
-            top_btn.configure(fg=style["fg"])
         root.update_idletasks()
 
     # ---- Windows 闪烁(经 root.after 回主线程, 由 notifier 注入) ----

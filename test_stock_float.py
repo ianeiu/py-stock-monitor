@@ -13,6 +13,7 @@
   python3 -m unittest test_stock_float.py -v
 """
 
+import ast
 import contextlib
 import csv
 import io
@@ -649,6 +650,535 @@ class TestNotifierGatingAndConfig(unittest.TestCase):
         finally:
             if os.path.exists(path):
                 os.remove(path)
+
+
+# ----------------------------------------------------------------------------
+# 8c. 「隐藏排序 / 隐藏删除 / 置顶」面板开关 —— 无头回归 (本次增强)
+#     (1) 配置持久化: _save_config_key 把 bool 落为裸 true/false,
+#         并经 load_settings 回读为真实布尔; 缺省回读为 False。
+#     (2) 显隐守卫逻辑: 用 FakeWidget 桩移植 _apply_row_tools_visibility 的判定,
+#         采用「宽度折叠」(config text=""+width=0+padx=0) 而非 pack/pack_forget 显隐,
+#         连击同状态/反复 toggle 稳定幂等, 全程不碰 pack 几何。不实例化 Tk(无 DISPLAY 约束)。
+# ----------------------------------------------------------------------------
+class TestHideSortDelToggles(unittest.TestCase):
+    """覆盖本次新增的 3 个设置面板开关的纯逻辑/持久化回归。
+
+    不实例化 Tk、不依赖 DISPLAY; GUI 组装仅标注「需真机验证」。
+    """
+
+    def _write_tmp_cfg(self, tmp_path):
+        Path(tmp_path).write_text("[settings]\n", encoding="utf-8")
+
+    def test_save_config_key_hide_sort_bool_true(self):
+        """hide_sort=True 落为裸小写布尔 'true', 经 tomllib 回读为真实 bool(True)。"""
+        try:
+            import tomllib
+        except ImportError:
+            tomllib = None
+        if tomllib is None:
+            self.skipTest("tomllib 不可用(需 py3.11+)")
+        path = "/tmp/qa_hide_cfg.toml"
+        try:
+            self._write_tmp_cfg(path)
+            sf._save_config_key("hide_sort", True, path=path)
+            with open(path, "rb") as fh:
+                data = tomllib.load(fh)
+            self.assertIs(True, data["settings"]["hide_sort"])
+            self.assertIn(b"hide_sort = true", Path(path).read_bytes())
+            # 反向锚定: 不得是字符串形态(旧 Bug 表征)
+            self.assertNotIn(b"hide_sort = 'true'", Path(path).read_bytes())
+            self.assertNotIn(b"hide_sort = 'True'", Path(path).read_bytes())
+        finally:
+            if os.path.exists(path):
+                os.remove(path)
+
+    def test_save_config_key_hide_del_bool_false(self):
+        """hide_del=False 落为裸小写布尔 'false', 回读为真实 bool(False)。"""
+        try:
+            import tomllib
+        except ImportError:
+            tomllib = None
+        if tomllib is None:
+            self.skipTest("tomllib 不可用(需 py3.11+)")
+        path = "/tmp/qa_hide_cfg.toml"
+        try:
+            self._write_tmp_cfg(path)
+            sf._save_config_key("hide_del", False, path=path)
+            with open(path, "rb") as fh:
+                data = tomllib.load(fh)
+            self.assertIs(False, data["settings"]["hide_del"])
+            self.assertIn(b"hide_del = false", Path(path).read_bytes())
+        finally:
+            if os.path.exists(path):
+                os.remove(path)
+
+    def test_save_config_key_persists_both_keys(self):
+        """连续写 hide_sort/hide_del, 用 re 锚定两键均为裸布尔(不依赖 tomllib)。"""
+        import re
+        path = "/tmp/qa_hide_cfg.toml"
+        try:
+            self._write_tmp_cfg(path)
+            sf._save_config_key("hide_sort", True, path=path)
+            sf._save_config_key("hide_del", True, path=path)
+            raw = Path(path).read_text("utf-8")
+            # 裸布尔(无引号)而非字符串; 用内联 (?m) 开启多行锚点
+            self.assertRegex(raw, r"(?m)^hide_sort = true$")
+            self.assertRegex(raw, r"(?m)^hide_del = true$")
+            self.assertNotIn("'true'", raw)
+        finally:
+            if os.path.exists(path):
+                os.remove(path)
+
+    def test_load_settings_roundtrip_hide_keys(self):
+        """经 load_settings 回读 _save_config_key 写入的 hide_sort/hide_del 为真实布尔。"""
+        path = "/tmp/qa_hide_cfg.toml"
+        try:
+            self._write_tmp_cfg(path)
+            sf._save_config_key("hide_sort", True, path=path)
+            sf._save_config_key("hide_del", False, path=path)
+            with mock.patch.object(sf, "SETTINGS_CANDIDATES", [path]), \
+                 mock.patch.object(sf, "STOCKS_CANDIDATES", [path]):
+                s = sf.load_settings()
+            self.assertIs(True, s.get("hide_sort"))
+            self.assertIs(False, s.get("hide_del"))
+        finally:
+            if os.path.exists(path):
+                os.remove(path)
+
+    def test_load_settings_default_hide_keys_false(self):
+        """缺省(无配置)时 hide_sort/hide_del 回读为缺省 False(或等价)。"""
+        with mock.patch.object(sf, "_load_first", return_value=None):
+            s = sf.load_settings()
+        self.assertNotIn("hide_sort", s)
+        self.assertNotIn("hide_del", s)
+        self.assertIs(False, s.get("hide_sort", False))
+        self.assertIs(False, s.get("hide_del", False))
+
+
+class FakeWidget:
+    """无 Tk 桩: 模拟 tk.Label 的文本/内边距显隐(宽度折叠)与 pack/pack_forget 副作用, 带调用计数。
+
+    新方案采用「宽度折叠」(config(text="", width=0, padx=0)) 而非 pack_forget/pack 来显隐;
+    桩同时记录 pack/pack_forget 调用, 供回归锁断言「全程不走 pack 几何」。
+
+    force_unmapped=True 时 winfo_ismapped() 始终返回 False(模拟 macOS Tk 不可靠行为),
+    用于回归测试「显隐逻辑不再依赖 winfo_ismapped」。
+    """
+
+    def __init__(self, mapped=True, force_unmapped=False, text="▲", padx=(0, 0)):
+        self._mapped = mapped
+        self._force_unmapped = force_unmapped
+        self._text = text
+        self._width = 0
+        self._padx = padx
+        # 原始文本/内边距(由 _make_rows 按控件语义注入, 对应源码 build 处的 _orig_* 记录)
+        self._orig_text = text
+        self._orig_padx = padx
+        self.pack_calls = 0
+        self.forget_calls = 0
+        self.config_calls = 0
+
+    def winfo_ismapped(self):
+        return False if self._force_unmapped else self._mapped
+
+    def pack(self, *args, **kwargs):
+        self._mapped = True
+        self.pack_calls += 1
+
+    def pack_forget(self):
+        self._mapped = False
+        self.forget_calls += 1
+
+    def cget(self, key):
+        return {"text": self._text, "width": self._width, "padx": self._padx}.get(key)
+
+    def config(self, **kwargs):
+        self.config_calls += 1
+        if "text" in kwargs:
+            self._text = kwargs["text"]
+        if "width" in kwargs:
+            self._width = kwargs["width"]
+        if "padx" in kwargs:
+            self._padx = kwargs["padx"]
+
+
+def _apply_row_tools_visibility_logic(move_btns, del_btns, hide_sort, hide_del):
+    """移植自 run_hud._apply_row_tools_visibility 的纯判定逻辑(去 Tk/root)。
+
+    采用「宽度折叠」而非 pack_forget/pack: 隐藏时清文本+宽度0+内边距0(水平空间塌缩为0),
+    显示时还原原始文本/内边距。macOS Tk 上反复 pack_forget/pack 偶发「第二次隐藏失效」,
+    此方案不触发几何抖动, 对任意次数 toggle 幂等稳健。
+    """
+    for code, (up_btn, down_btn) in move_btns.items():
+        for w in (up_btn, down_btn):
+            if hide_sort:
+                w.config(text="", width=0, padx=0)
+            else:
+                w.config(text=w._orig_text, width=0, padx=w._orig_padx)
+    for code, del_btn in del_btns.items():
+        if hide_del:
+            del_btn.config(text="", width=0, padx=0)
+        else:
+            del_btn.config(text=del_btn._orig_text, width=0, padx=del_btn._orig_padx)
+
+
+class TestRowToolsVisibilityGuard(unittest.TestCase):
+    """显隐逻辑单测: 直接移植 _apply_row_tools_visibility 判定(无 Tk)。
+
+    覆盖回归(宽度折叠方案):
+    - hide_sort=True -> 排序箭头文本塌缩为 "" 且 padx=0(水平空间塌缩); 切回 False -> 还原原始文本/内边距。
+    - hide_del=True -> 删除按钮文本塌缩; 反之还原。
+    - 不依赖 winfo_ismapped: 即便桩的 winfo_ismapped 始终 False(模拟 macOS), 隐藏仍生效。
+    - 全程不调用 pack/pack_forget(锁定「不再走几何显隐」)。
+    """
+
+    def _make_rows(self, force_unmapped=False):
+        def mk(text, padx):
+            w = FakeWidget(mapped=True, force_unmapped=force_unmapped, text=text, padx=padx)
+            w._orig_text = text
+            w._orig_padx = padx
+            return w
+        return (
+            {"A": (mk("▲", (0, 0)), mk("▼", (0, 0))),
+             "B": (mk("▲", (0, 0)), mk("▼", (0, 0)))},
+            {"A": mk("🗑", (0, 1)), "B": mk("🗑", (0, 1))},
+        )
+
+    def test_hide_sort_toggles_arrows(self):
+        move_btns, del_btns = self._make_rows()
+        _apply_row_tools_visibility_logic(move_btns, del_btns, hide_sort=True, hide_del=False)
+        for up, down in move_btns.values():
+            self.assertEqual(up.cget("text"), "")
+            self.assertEqual(up.cget("padx"), 0)
+            self.assertEqual(down.cget("text"), "")
+            self.assertEqual(down.cget("padx"), 0)
+            # 宽度折叠方案不碰 pack 几何
+            self.assertEqual(up.pack_calls + up.forget_calls, 0)
+            self.assertEqual(down.pack_calls + down.forget_calls, 0)
+        # 切回显示: 还原原始文本与内边距
+        _apply_row_tools_visibility_logic(move_btns, del_btns, hide_sort=False, hide_del=False)
+        for up, down in move_btns.values():
+            self.assertEqual(up.cget("text"), up._orig_text)
+            self.assertEqual(up.cget("padx"), up._orig_padx)
+            self.assertEqual(down.cget("text"), down._orig_text)
+            self.assertEqual(down.cget("padx"), down._orig_padx)
+
+    def test_hide_del_toggles_delete_button(self):
+        move_btns, del_btns = self._make_rows()
+        _apply_row_tools_visibility_logic(move_btns, del_btns, hide_sort=False, hide_del=True)
+        for del_btn in del_btns.values():
+            self.assertEqual(del_btn.cget("text"), "")
+            self.assertEqual(del_btn.cget("padx"), 0)
+            self.assertEqual(del_btn.pack_calls + del_btn.forget_calls, 0)
+        _apply_row_tools_visibility_logic(move_btns, del_btns, hide_sort=False, hide_del=False)
+        for del_btn in del_btns.values():
+            self.assertEqual(del_btn.cget("text"), del_btn._orig_text)
+            self.assertEqual(del_btn.cget("padx"), del_btn._orig_padx)
+
+    def test_apply_collapses_text_even_when_macos_ismapped_broken(self):
+        """无论 winfo_ismapped 返回什么(模拟 macOS 永远 False), hide 仍通过宽度折叠真正生效,
+        且全程不碰 pack/pack_forget。"""
+        move_btns, del_btns = self._make_rows(force_unmapped=True)
+        # 隐藏排序 + 删除
+        _apply_row_tools_visibility_logic(move_btns, del_btns, hide_sort=True, hide_del=True)
+        for up, down in move_btns.values():
+            self.assertEqual(up.cget("text"), "")
+            self.assertEqual(up.cget("padx"), 0)
+            self.assertEqual(down.cget("text"), "")
+            self.assertEqual(down.cget("padx"), 0)
+        for del_btn in del_btns.values():
+            self.assertEqual(del_btn.cget("text"), "")
+            self.assertEqual(del_btn.cget("padx"), 0)
+        # 全程零 pack/pack_forget 调用
+        for up, down in move_btns.values():
+            self.assertEqual(up.pack_calls + up.forget_calls, 0)
+            self.assertEqual(down.pack_calls + down.forget_calls, 0)
+        for del_btn in del_btns.values():
+            self.assertEqual(del_btn.pack_calls + del_btn.forget_calls, 0)
+        # 切回显示: 还原原始文本/内边距
+        _apply_row_tools_visibility_logic(move_btns, del_btns, hide_sort=False, hide_del=False)
+        for up, down in move_btns.values():
+            self.assertEqual(up.cget("text"), up._orig_text)
+            self.assertEqual(up.cget("padx"), up._orig_padx)
+            self.assertEqual(down.cget("text"), down._orig_text)
+            self.assertEqual(down.cget("padx"), down._orig_padx)
+        for del_btn in del_btns.values():
+            self.assertEqual(del_btn.cget("text"), del_btn._orig_text)
+            self.assertEqual(del_btn.cget("padx"), del_btn._orig_padx)
+
+    def test_macos_unreliable_ismapped_regression(self):
+        """回归: macOS Tk 下 winfo_ismapped 恒 False 时, 隐藏排序/删除仍通过宽度折叠真正生效。"""
+        move_btns, del_btns = self._make_rows(force_unmapped=True)
+        # 隐藏排序: 断言文本塌缩为 ""
+        _apply_row_tools_visibility_logic(move_btns, del_btns, hide_sort=True, hide_del=False)
+        for up, down in move_btns.values():
+            self.assertEqual(up.cget("text"), "")
+            self.assertEqual(down.cget("text"), "")
+        # 隐藏删除: 断言文本塌缩为 ""
+        _apply_row_tools_visibility_logic(move_btns, del_btns, hide_sort=False, hide_del=True)
+        for del_btn in del_btns.values():
+            self.assertEqual(del_btn.cget("text"), "")
+
+    def test_repeat_same_state_reapplies(self):
+        """新行为: 重复相同状态会再次 apply(宽度折叠, 幂等), 不依赖 pack_forget, 且无几何抖动。"""
+        move_btns, del_btns = self._make_rows()
+        _apply_row_tools_visibility_logic(move_btns, del_btns, hide_sort=True, hide_del=True)
+        _apply_row_tools_visibility_logic(move_btns, del_btns, hide_sort=True, hide_del=True)
+        # 每次 hide 均将文本塌缩为 ""(幂等, 无 pack_forget)
+        for up, down in move_btns.values():
+            self.assertEqual(up.cget("text"), "")
+            self.assertEqual(down.cget("text"), "")
+        for del_btn in del_btns.values():
+            self.assertEqual(del_btn.cget("text"), "")
+        # 状态仍稳定为隐藏, 且全程零 pack 调用
+        for up, down in move_btns.values():
+            self.assertEqual(up.pack_calls + up.forget_calls, 0)
+        for del_btn in del_btns.values():
+            self.assertEqual(del_btn.pack_calls + del_btn.forget_calls, 0)
+
+    def test_repeated_toggle_n_times_is_stable_and_never_packs(self):
+        """回归锁: 连续 toggle 多次(如 8 次)后, 控件最终态正确, 且全程不调用任何 pack/pack_forget。
+
+        直接锁定「反复开关不再失效」——macOS Tk 反复 pack_forget/pack 偶发第二次隐藏失效的老毛病。
+
+        本测试内嵌「旧 buggy 逻辑」对照(force_unmapped 模拟 macOS winfo_ismapped 恒 False),
+        证明本锁确实能区分旧 bug 与新修复, 而非恒过:
+          - 旧逻辑在 N 次 toggle 后仍调用 pack 几何, 且在隐藏步不真正塌缩文本(隐藏失效);
+          - 新逻辑(宽度折叠)在 N 次 toggle 后状态稳定、文本正确塌缩/还原, 且全程零 pack。
+        """
+        n = 8
+
+        # ---- 新逻辑(移植自修复版源码): 宽度折叠 ----
+        move_btns, del_btns = self._make_rows()
+        for i in range(1, n + 1):
+            hide = (i % 2 == 1)  # 奇数次 = 隐藏, 偶数次 = 显示
+            _apply_row_tools_visibility_logic(
+                move_btns, del_btns, hide_sort=hide, hide_del=hide)
+            for up, down in move_btns.values():
+                if hide:
+                    self.assertEqual(up.cget("text"), "")
+                    self.assertEqual(down.cget("text"), "")
+                else:
+                    self.assertEqual(up.cget("text"), up._orig_text)
+                    self.assertEqual(down.cget("text"), down._orig_text)
+            for del_btn in del_btns.values():
+                if hide:
+                    self.assertEqual(del_btn.cget("text"), "")
+                else:
+                    self.assertEqual(del_btn.cget("text"), del_btn._orig_text)
+        # 第 8 次(偶数) => 显示态
+        self.assertEqual(n % 2, 0)
+        for up, down in move_btns.values():
+            self.assertEqual(up.cget("text"), up._orig_text)
+            self.assertEqual(down.cget("text"), down._orig_text)
+            self.assertEqual(up.pack_calls + up.forget_calls, 0)
+            self.assertEqual(down.pack_calls + down.forget_calls, 0)
+        for del_btn in del_btns.values():
+            self.assertEqual(del_btn.cget("text"), del_btn._orig_text)
+            self.assertEqual(del_btn.pack_calls + del_btn.forget_calls, 0)
+
+        # ---- 旧 buggy 逻辑对照(force_unmapped 模拟 macOS winfo_ismapped 恒 False) ----
+        def buggy_apply(move_btns, hide_sort):
+            for up_btn, down_btn in move_btns.values():
+                if hide_sort:
+                    if up_btn.winfo_ismapped():
+                        up_btn.pack_forget()
+                    if down_btn.winfo_ismapped():
+                        down_btn.pack_forget()
+                else:
+                    if not up_btn.winfo_ismapped():
+                        up_btn.pack(side="right")
+                    if not down_btn.winfo_ismapped():
+                        down_btn.pack(side="right")
+
+        def make_buggy_rows():
+            out = {}
+            for c in ("A", "B"):
+                up = FakeWidget(mapped=True, force_unmapped=True, text="▲", padx=(0, 0))
+                down = FakeWidget(mapped=True, force_unmapped=True, text="▼", padx=(0, 0))
+                up._orig_text, up._orig_padx = "▲", (0, 0)
+                down._orig_text, down._orig_padx = "▼", (0, 0)
+                out[c] = (up, down)
+            return out
+
+        buggy = make_buggy_rows()
+        buggy_collapsed_on_hidden = False  # 记录旧逻辑是否在某个隐藏步真正塌缩文本
+        for i in range(1, n + 1):
+            hide = (i % 2 == 1)
+            buggy_apply(buggy, hide_sort=hide)
+            if hide:
+                for up, down in buggy.values():
+                    # 旧逻辑依赖 winfo_ismapped(恒 False) -> 跳过 pack_forget -> 文本从不塌缩
+                    if up.cget("text") == "" or down.cget("text") == "":
+                        buggy_collapsed_on_hidden = True
+        # 对比断言 1: 旧 buggy 逻辑在隐藏步从不真正塌缩文本(隐藏失效) -> 新修复才有意义
+        self.assertFalse(
+            buggy_collapsed_on_hidden,
+            "对照断言: 旧 buggy 逻辑不应在隐藏步塌缩文本(否则本回归锁无法证明新修复的必要性)",
+        )
+        # 对比断言 2: 旧 buggy 逻辑走 pack 几何(本次修复彻底移除) -> pack/forget 调用数 > 0
+        total_pack = sum(
+            up.pack_calls + up.forget_calls + down.pack_calls + down.forget_calls
+            for up, down in buggy.values()
+        )
+        self.assertGreater(
+            total_pack, 0,
+            "对照断言: 旧 buggy 逻辑应调用 pack/pack_forget(否则本回归锁无法证明新修复确实移除了几何抖动)",
+        )
+
+
+# ----------------------------------------------------------------------------
+# 8b. 源码契约回归锁: 真实 _apply_row_tools_visibility / _refresh_move_buttons 不得再调用
+#     winfo_ismapped; 且全模块不得残留 top_btn。直读 stock_float.py 的 AST(无 Tk、无 DISPLAY),
+#     弥补"移植副本"式测试无法捕获「源码被回退到旧 bug」的盲区。
+# ----------------------------------------------------------------------------
+class TestRowToolsVisibilitySourceContract(unittest.TestCase):
+    """锚定真实源码: 若工程师把 fix 回退成旧逻辑(如 if not up_btn.winfo_ismapped(): continue
+    或 if up_btn.winfo_ismapped(): up_btn.pack_forget(), 或重新走 pack/pack_forget 显隐),
+    本测试必须失败。
+
+    采用 AST 解析而非正则/副本: 只检查「可执行代码里是否存在 .winfo_ismapped() / .pack() / .pack_forget()
+    调用, 以及是否真用了宽度折叠(_orig_text/_orig_padx + .config())」,
+    完全忽略 docstring/注释, 避免误报, 也真正绑定到 stock_float.py 的真实闭包函数。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls._src = Path(sf.__file__).read_text(encoding="utf-8")
+        cls._tree = ast.parse(cls._src)
+        cls._hud = next(
+            n for n in cls._tree.body
+            if isinstance(n, ast.FunctionDef) and n.name == "run_hud"
+        )
+        cls._nested = {
+            f.name: f for f in cls._hud.body
+            if isinstance(f, ast.FunctionDef)
+            and f.name in ("_apply_row_tools_visibility", "_refresh_move_buttons")
+        }
+
+    @staticmethod
+    def _calls_ismapped(node):
+        return any(
+            isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "winfo_ismapped"
+            for n in ast.walk(node)
+        )
+
+    @staticmethod
+    def _calls_attr(node, attrs):
+        """node 内部是否调用了任意形如 ``.attr(...)``(attr ∈ attrs) 的方法。"""
+        return any(
+            isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr in attrs
+            for n in ast.walk(node)
+        )
+
+    @staticmethod
+    def _uses_width_fold(node):
+        """node 内部是否采用了宽度折叠: 调用了 .config() 且引用了 _orig_text/_orig_padx。"""
+        has_config = any(
+            isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "config"
+            for n in ast.walk(node)
+        )
+        has_orig = any(
+            isinstance(n, ast.Attribute)
+            and n.attr in ("_orig_text", "_orig_padx")
+            for n in ast.walk(node)
+        )
+        return has_config and has_orig
+
+    def test_apply_row_tools_visibility_no_ismapped(self):
+        self.assertIn("_apply_row_tools_visibility", self._nested,
+                      "源码中找不到 run_hud._apply_row_tools_visibility 闭包")
+        self.assertFalse(
+            self._calls_ismapped(self._nested["_apply_row_tools_visibility"]),
+            "回归: _apply_row_tools_visibility 仍调用 winfo_ismapped()(旧 bug: macOS 下隐藏失效)",
+        )
+
+    def test_apply_row_tools_visibility_no_pack_geometry(self):
+        """锁定「宽度折叠、不走 pack」: _apply_row_tools_visibility 不得调用 pack()/pack_forget()。"""
+        self.assertFalse(
+            self._calls_attr(self._nested["_apply_row_tools_visibility"], ("pack", "pack_forget")),
+            "回归: _apply_row_tools_visibility 仍走 pack/pack_forget(旧 bug: macOS 反复 toggle 失效)",
+        )
+
+    def test_apply_row_tools_visibility_uses_width_fold(self):
+        """正向锁: _apply_row_tools_visibility 确实采用宽度折叠(config text/width/padx + _orig_* 还原)。"""
+        node = self._nested["_apply_row_tools_visibility"]
+        self.assertTrue(
+            self._uses_width_fold(node),
+            "宽度折叠方案必须调用 .config() 并引用 _orig_text/_orig_padx 还原原始态",
+        )
+
+    def test_refresh_move_buttons_no_ismapped(self):
+        self.assertIn("_refresh_move_buttons", self._nested,
+                      "源码中找不到 run_hud._refresh_move_buttons 闭包")
+        self.assertFalse(
+            self._calls_ismapped(self._nested["_refresh_move_buttons"]),
+            "回归: _refresh_move_buttons 仍用 winfo_ismapped 守卫(旧 bug: 隐藏时跳过灰显)",
+        )
+
+    def test_refresh_move_buttons_no_pack_geometry(self):
+        """_refresh_move_buttons 只做 fg 灰显, 不得触碰 pack/pack_forget 几何。"""
+        self.assertFalse(
+            self._calls_attr(self._nested["_refresh_move_buttons"], ("pack", "pack_forget")),
+            "回归: _refresh_move_buttons 不应调用 pack/pack_forget(只配置 fg)",
+        )
+
+    def test_no_top_btn_residue(self):
+        """全模块(含注释/元组)不得残留 top_btn 引用 —— 锁定「删除 header 置顶按钮」改动。"""
+        self.assertNotIn("top_btn", self._src,
+                         "回归: stock_float.py 仍残留 top_btn 引用(创建/config/注释)")
+
+    def test_discriminates_buggy_vs_fixed(self):
+        """证明本套测试工具具备区分力: 旧 buggy 逻辑依赖 winfo_ismapped 导致隐藏失效(文本未塌缩),
+        新逻辑(宽度折叠)在 winfo_ismapped 恒 False 时也真正塌缩文本/内边距, 且全程不碰 pack。"""
+        def buggy_apply(move_btns, hide_sort):
+            # 旧逻辑: 依赖 winfo_ismapped() 判定控件是否可见, 不可见就跳过 pack_forget
+            for up_btn, down_btn in move_btns.values():
+                if hide_sort:
+                    if up_btn.winfo_ismapped():
+                        up_btn.pack_forget()
+                    if down_btn.winfo_ismapped():
+                        down_btn.pack_forget()
+                else:
+                    if not up_btn.winfo_ismapped():
+                        up_btn.pack(side="right")
+                    if not down_btn.winfo_ismapped():
+                        down_btn.pack(side="right")
+
+        def make_rows(force_unmapped):
+            out = {}
+            for c in ("A", "B"):
+                up = FakeWidget(mapped=True, force_unmapped=force_unmapped, text="▲", padx=(0, 0))
+                down = FakeWidget(mapped=True, force_unmapped=force_unmapped, text="▼", padx=(0, 0))
+                up._orig_text, up._orig_padx = "▲", (0, 0)
+                down._orig_text, down._orig_padx = "▼", (0, 0)
+                out[c] = (up, down)
+            return out
+
+        # 旧 bug: winfo_ismapped 恒 False -> 跳过 pack_forget -> 文本未塌缩(隐藏失效)
+        buggy = make_rows(force_unmapped=True)
+        buggy_apply(buggy, hide_sort=True)
+        for up, down in buggy.values():
+            self.assertEqual(up.cget("text"), "▲", "对照: 旧逻辑本应隐藏失效(文本未塌缩)")
+            self.assertEqual(down.cget("text"), "▼", "对照: 旧逻辑本应隐藏失效(文本未塌缩)")
+
+        # 新逻辑(移植自源码修复版): 宽度折叠 -> 文本真正塌缩, 不依赖 winfo_ismapped
+        fixed = make_rows(force_unmapped=True)
+        _apply_row_tools_visibility_logic(fixed, {}, hide_sort=True, hide_del=False)
+        for up, down in fixed.values():
+            self.assertEqual(up.cget("text"), "", "修复版应在 winfo_ismapped 恒 False 时也塌缩文本")
+            self.assertEqual(down.cget("text"), "", "修复版应在 winfo_ismapped 恒 False 时也塌缩文本")
+            self.assertEqual(up.cget("padx"), 0)
+            self.assertEqual(down.cget("padx"), 0)
+            # 全程不碰 pack 几何
+            self.assertEqual(up.pack_calls + up.forget_calls, 0)
+            self.assertEqual(down.pack_calls + down.forget_calls, 0)
 
 
 # ----------------------------------------------------------------------------
