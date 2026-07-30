@@ -777,9 +777,14 @@ class FakeWidget:
         self.pack_calls = 0
         self.forget_calls = 0
         self.config_calls = 0
+        self._destroyed = False
 
     def winfo_ismapped(self):
         return False if self._force_unmapped else self._mapped
+
+    def winfo_exists(self):
+        """模拟 Tk 的 winfo exists: 对已 destroy 的 widget 安全返回 0(不抛错)。"""
+        return 0 if self._destroyed else 1
 
     def pack(self, *args, **kwargs):
         self._mapped = True
@@ -808,14 +813,23 @@ def _apply_row_tools_visibility_logic(move_btns, del_btns, hide_sort, hide_del):
     采用「宽度折叠」而非 pack_forget/pack: 隐藏时清文本+宽度0+内边距0(水平空间塌缩为0),
     显示时还原原始文本/内边距。macOS Tk 上反复 pack_forget/pack 偶发「第二次隐藏失效」,
     此方案不触发几何抖动, 对任意次数 toggle 幂等稳健。
+
+    防御: 遍历前用 winfo_exists() 跳过已 destroy 的残留引用(否则对已销毁 widget 调
+    .config() 抛 TclError: invalid command name)——与真实源码行为一致。
     """
-    for code, (up_btn, down_btn) in move_btns.items():
+    for code, (up_btn, down_btn) in list(move_btns.items()):
+        if not up_btn.winfo_exists():
+            move_btns.pop(code, None)
+            continue
         for w in (up_btn, down_btn):
             if hide_sort:
                 w.config(text="", width=0, padx=0)
             else:
                 w.config(text=w._orig_text, width=0, padx=w._orig_padx)
-    for code, del_btn in del_btns.items():
+    for code, del_btn in list(del_btns.items()):
+        if not del_btn.winfo_exists():
+            del_btns.pop(code, None)
+            continue
         if hide_del:
             del_btn.config(text="", width=0, padx=0)
         else:
@@ -1026,6 +1040,29 @@ class TestRowToolsVisibilityGuard(unittest.TestCase):
             "对照断言: 旧 buggy 逻辑应调用 pack/pack_forget(否则本回归锁无法证明新修复确实移除了几何抖动)",
         )
 
+    def test_stale_destroyed_widget_does_not_crash_and_is_popped(self):
+        """回归(2026-07-30 真机崩溃): 字典里若残留已 destroy 的 widget 引用
+        (如删除股票后未清理干净), 遍历时不抛 TclError, 且自动将该 code 从字典弹出,
+        存活 widget 仍正常处理。等价于真实源码 _apply_row_tools_visibility 的 winfo_exists 防御。"""
+        move_btns, del_btns = self._make_rows()
+        # 标记 A 的控件为「已销毁」(winfo_exists() 返回 0), 模拟残留失效引用
+        up_a, down_a = move_btns["A"]
+        up_a._destroyed = True
+        down_a._destroyed = True
+        del_btns["A"]._destroyed = True
+        # 调用不应抛错(旧行为在此抛 TclError: invalid command name)
+        _apply_row_tools_visibility_logic(move_btns, del_btns, hide_sort=True, hide_del=True)
+        # 已销毁的 A 应被弹出, 杜绝后续再次遍历崩溃
+        self.assertNotIn("A", move_btns)
+        self.assertNotIn("A", del_btns)
+        # 存活的 B 仍被正常处理(文本塌缩)
+        self.assertIn("B", move_btns)
+        self.assertIn("B", del_btns)
+        up_b, down_b = move_btns["B"]
+        self.assertEqual(up_b.cget("text"), "")
+        self.assertEqual(down_b.cget("text"), "")
+        self.assertEqual(del_btns["B"].cget("text"), "")
+
 
 # ----------------------------------------------------------------------------
 # 8b. 源码契约回归锁: 真实 _apply_row_tools_visibility / _refresh_move_buttons 不得再调用
@@ -1129,6 +1166,21 @@ class TestRowToolsVisibilitySourceContract(unittest.TestCase):
             "回归: _refresh_move_buttons 不应调用 pack/pack_forget(只配置 fg)",
         )
 
+    def test_apply_row_tools_visibility_guards_destroyed_widgets(self):
+        """锁定防御②: _apply_row_tools_visibility 遍历前必须用 winfo_exists() 跳过已销毁 widget,
+        否则对已销毁引用调 .config() 会抛 TclError(2026-07-30 真机崩溃)。"""
+        self.assertTrue(
+            self._calls_attr(self._nested["_apply_row_tools_visibility"], ("winfo_exists",)),
+            "回归: _apply_row_tools_visibility 未做 winfo_exists 防御(删除股票后残留引用会崩溃)",
+        )
+
+    def test_refresh_move_buttons_guards_destroyed_widgets(self):
+        """锁定防御③: _refresh_move_buttons 遍历前也必须用 winfo_exists() 跳过已销毁 widget。"""
+        self.assertTrue(
+            self._calls_attr(self._nested["_refresh_move_buttons"], ("winfo_exists",)),
+            "回归: _refresh_move_buttons 未做 winfo_exists 防御",
+        )
+
     def test_no_top_btn_residue(self):
         """全模块(含注释/元组)不得残留 top_btn 引用 —— 锁定「删除 header 置顶按钮」改动。"""
         self.assertNotIn("top_btn", self._src,
@@ -1179,6 +1231,35 @@ class TestRowToolsVisibilitySourceContract(unittest.TestCase):
             # 全程不碰 pack 几何
             self.assertEqual(up.pack_calls + up.forget_calls, 0)
             self.assertEqual(down.pack_calls + down.forget_calls, 0)
+
+
+# ----------------------------------------------------------------------------
+# 8c. 根因①回归锁: remove_stock_from_memory 必须把 del_btns/move_btns 一并清理,
+#     否则删除股票后这两个字典残留已销毁 widget 引用(真机崩溃源)。
+# ----------------------------------------------------------------------------
+class TestRemoveStockCleansToolButtons(unittest.TestCase):
+    """根因①(2026-07-30 真机崩溃): 删除股票时, remove_stock_from_memory 必须清理 del_btns
+    与 move_btns 中对应 code 的条目。否则行情行 frame 被 destroy 后, 这两个字典残留已销毁
+    Label 引用, 后续 _apply_row_tools_visibility 遍历到它们调 .config() 抛 TclError。"""
+
+    def test_remove_stock_clears_del_and_move_btns(self):
+        stocks = [{"code": "A", "name": "测试A"}, {"code": "B", "name": "测试B"}]
+        del_btns = {
+            "A": FakeWidget(text="🗑", padx=(0, 1)),
+            "B": FakeWidget(text="🗑", padx=(0, 1)),
+        }
+        move_btns = {
+            "A": (FakeWidget(text="▲", padx=(0, 0)), FakeWidget(text="▼", padx=(0, 0))),
+            "B": (FakeWidget(text="▲", padx=(0, 0)), FakeWidget(text="▼", padx=(0, 0))),
+        }
+        removed = sf.remove_stock_from_memory(
+            stocks, "A", {"del_btns": del_btns, "move_btns": move_btns})
+        self.assertEqual(removed["code"], "A")
+        self.assertNotIn("A", del_btns, "根因①: 删除后 del_btns 应清除该 code")
+        self.assertNotIn("A", move_btns, "根因①: 删除后 move_btns 应清除该 code")
+        self.assertIn("B", del_btns)
+        self.assertIn("B", move_btns)
+        self.assertEqual([s["code"] for s in stocks], ["B"])
 
 
 # ----------------------------------------------------------------------------

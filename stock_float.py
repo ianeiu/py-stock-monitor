@@ -1782,6 +1782,10 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             if not btns:
                 continue
             up_btn, down_btn = btns
+            # 防御: 跳过已被 destroy 的残留引用, 避免对已销毁 widget 调 .config() 抛 TclError
+            if not up_btn.winfo_exists():
+                move_btns.pop(c, None)
+                continue
             # 若「隐藏排序」开启, 箭头已被 pack_forget, 跳过灰显配置(避免对隐藏 widget 无谓操作)。
             # 注意: 不依赖 winfo_ismapped()(macOS Tk 上该值不可靠, 会导致永远跳过)。
             if bool(settings.get("hide_sort", False)):
@@ -1798,13 +1802,21 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         """
         hide_sort = bool(settings.get("hide_sort", False))
         hide_del = bool(settings.get("hide_del", False))
-        for code, (up_btn, down_btn) in move_btns.items():
+        for code, (up_btn, down_btn) in list(move_btns.items()):
+            # 防御: 跳过已被 destroy 的残留引用(如极端情况下删除股票后未清理干净的 code),
+            # 避免对已销毁 widget 调 .config() 抛 TclError: invalid command name
+            if not up_btn.winfo_exists():
+                move_btns.pop(code, None)
+                continue
             for w in (up_btn, down_btn):
                 if hide_sort:
                     w.config(text="", width=0, padx=0)
                 else:
                     w.config(text=w._orig_text, width=0, padx=w._orig_padx)
-        for code, del_btn in del_btns.items():
+        for code, del_btn in list(del_btns.items()):
+            if not del_btn.winfo_exists():
+                del_btns.pop(code, None)
+                continue
             if hide_del:
                 del_btn.config(text="", width=0, padx=0)
             else:
@@ -2147,6 +2159,11 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             "row_vis": row_vis,
             "last_sig_change": last_sig_change,
             "last_sigs": last_sigs,
+            # 行情行 frame 被 destroy 时, 内部 del/up/down 子 Label 一并销毁;
+            # 必须同步清理这两个字典, 否则残留已销毁引用, 后续 _apply_row_tools_visibility
+            # 遍历到它们调 .config() 会抛 TclError: invalid command name
+            "del_btns": del_btns,
+            "move_btns": move_btns,
         })
         if qf is not None:
             qf.destroy()
