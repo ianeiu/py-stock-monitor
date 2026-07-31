@@ -1186,6 +1186,18 @@ class TestRowToolsVisibilitySourceContract(unittest.TestCase):
         self.assertNotIn("top_btn", self._src,
                          "回归: stock_float.py 仍残留 top_btn 引用(创建/config/注释)")
 
+    def test_no_winformismapped_call_anywhere(self):
+        """全模块 AST 不得再有 winfo_ismapped(...) 函数调用(仅允许注释/文档字符串里的文字)。
+        锁定 A 整改: macOS Tk 上 winfo_ismapped 对可见控件常返回 False, 所有显隐已改为
+        按目标态无条件 apply 或显式 panel_state 布尔, 不再依赖该不可信值。"""
+        bad = []
+        for node in ast.walk(self._tree):
+            if isinstance(node, ast.Call):
+                f = node.func
+                if isinstance(f, ast.Attribute) and f.attr == "winfo_ismapped":
+                    bad.append(ast.get_source_segment(self._src, node) or "<winfo_ismapped call>")
+        self.assertEqual(bad, [], f"回归: 模块内仍残留 winfo_ismapped() 调用: {bad}")
+
     def test_discriminates_buggy_vs_fixed(self):
         """证明本套测试工具具备区分力: 旧 buggy 逻辑依赖 winfo_ismapped 导致隐藏失效(文本未塌缩),
         新逻辑(宽度折叠)在 winfo_ismapped 恒 False 时也真正塌缩文本/内边距, 且全程不碰 pack。"""
@@ -1479,7 +1491,6 @@ class TestGuiReviewOnly(unittest.TestCase):
     """以下项因无 DISPLAY 无法无头实例化 Tk, 仅做代码层存在性与接口契约校验。
 
     需真机验证项:
-      - 暂停/继续按钮 (_toggle_pause 改 state["paused"])
       - 频率控件 (_cycle_freq 循环 1->3->5->10->1)
       - Windows 闪烁 (_flash_window 经 root.after 回主线程)
       - 暗色渲染 (build_style 已逻辑验证, 像素渲染需真机)
@@ -1487,7 +1498,7 @@ class TestGuiReviewOnly(unittest.TestCase):
 
     def test_gui_symbols_exist(self):
         # 模块级符号存在且可调用 (具体行为需真机)
-        # 注: _toggle_pause / _cycle_freq / _flash_window 是 run_hud 内部嵌套函数,
+        # 注: _cycle_freq / _flash_window 是 run_hud 内部嵌套函数,
         #     仅能在本机建 Tk 后提取, 此处不实例化 Tk, 故只校验模块级导出符号。
         for name in ("run_hud",):
             self.assertTrue(hasattr(sf, name), f"{name} 缺失")
@@ -1913,13 +1924,29 @@ class TestApplySigVisibility(unittest.TestCase):
         self.assertEqual(len(self._forget_calls(sf_row)), 0, "可见不应 pack_forget")
         self.assertTrue(sf_row.winfo_ismapped(), "pack 后应为已映射")
 
-    def test_visible_idempotent_when_mapped(self):
-        # visible=True 且已映射 -> 不再 pack(幂等)
+    def test_visible_always_packs_regardless_of_mapped(self):
+        # 新可靠行为: visible=True 时无条件 pack(幂等), 不依赖 winfo_ismapped——
+        # macOS Tk 上 winfo_ismapped 对可见控件常返回 False, 旧守卫会导致"该显不显"。
+        # 即便已映射, 仍应 pack 一次(幂等空操作), 映射状态保持。
         sf_row = _StubSigRow(mapped=True)
         sf.apply_sig_visibility(sf_row, True, dict(fill="x"))
-        self.assertEqual(len(self._pack_calls(sf_row)), 0, "已映射时不应再 pack")
+        self.assertEqual(len(self._pack_calls(sf_row)), 1, "可见应无条件 pack(已映射也 pack, 幂等)")
         self.assertEqual(len(self._forget_calls(sf_row)), 0)
         self.assertTrue(sf_row.winfo_ismapped())
+
+    def test_no_winformismapped_dependency(self):
+        # 强锁: 函数不得查询 winfo_ismapped 来决定显隐(macOS 上该值不可信)。
+        # 用会抛异常的 winfo_ismapped 替代, 若被调用则测试失败。
+        sf_row = _StubSigRow(mapped=True)
+        sf_row.winfo_ismapped = lambda: (_ for _ in ()).throw(
+            RuntimeError("winfo_ismapped must not be called"))
+        try:
+            sf.apply_sig_visibility(sf_row, True, dict(fill="x"))
+            sf.apply_sig_visibility(sf_row, False, dict(fill="x"))
+        except RuntimeError as exc:  # pragma: no cover
+            self.fail(f"apply_sig_visibility 仍依赖 winfo_ismapped: {exc}")
+        self.assertEqual(len(self._pack_calls(sf_row)), 1, "可见应 pack 一次")
+        self.assertEqual(len(self._forget_calls(sf_row)), 1, "隐藏应 pack_forget 一次")
 
     def test_hidden_forgets_when_mapped(self):
         # visible=False 且已映射 -> 调 pack_forget, 不调 pack
@@ -1929,11 +1956,12 @@ class TestApplySigVisibility(unittest.TestCase):
         self.assertEqual(len(self._pack_calls(sf_row)), 0, "隐藏不应 pack")
         self.assertFalse(sf_row.winfo_ismapped(), "pack_forget 后应未映射")
 
-    def test_hidden_idempotent_when_unmapped(self):
-        # visible=False 且未映射 -> 不再 pack_forget(幂等)
+    def test_hidden_always_forgets_regardless_of_mapped(self):
+        # 新可靠行为: visible=False 时无条件 pack_forget(幂等空操作), 不依赖 winfo_ismapped。
+        # 即便未映射, 仍应 pack_forget 一次(无副作用), 且保持未映射。
         sf_row = _StubSigRow(mapped=False)
         sf.apply_sig_visibility(sf_row, False, dict(fill="x"))
-        self.assertEqual(len(self._forget_calls(sf_row)), 0, "未映射时不应再 pack_forget")
+        self.assertEqual(len(self._forget_calls(sf_row)), 1, "隐藏应无条件 pack_forget(未映射也调, 幂等)")
         self.assertEqual(len(self._pack_calls(sf_row)), 0)
         self.assertFalse(sf_row.winfo_ismapped())
 

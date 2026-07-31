@@ -76,6 +76,11 @@ SETTINGS_CANDIDATES = ["config.toml", "config.json", "settings.toml",
 STOCKS_CANDIDATES = ["stocks.toml", "stocks.json", "stocks.yaml", "stocks.yml",
                      "watchlist.toml", "watchlist.json", "自选股.toml"]
 
+# 热重载守卫: 记录本程序自身最近一次写文件的时间戳, 用于区分"自己写的"与"外部编辑的"改动,
+# 避免配置热重载线程把自身的持久化写回误判为外部修改而重复重载(详见 run_hud 的 _check_reload)。
+LAST_CONFIG_WRITE_T = 0.0
+LAST_STOCKS_WRITE_T = 0.0
+
 # 历史信号落盘(单文件模式)
 SIGNAL_CSV = os.path.join(SCRIPT_DIR, "signals.csv")
 # CSV 字段(顺序即列顺序): 既有字段在前, 新增指标字段追加在尾部(向后兼容旧 CSV)
@@ -1009,6 +1014,8 @@ def _save_config_key(key: str, value, path: str = None) -> None:
                 if line.strip() == '[settings]':
                     out.insert(i + 1, new_line)
                     break
+        global LAST_CONFIG_WRITE_T
+        LAST_CONFIG_WRITE_T = time.time()
         Path(target).write_text('\n'.join(out), 'utf-8')
     except Exception:
         # 异常静默吞掉, 不阻塞 UI
@@ -1171,6 +1178,8 @@ def rewrite_stocks_toml(path: str, add: Optional[dict] = None,
     content += body
     if not content.endswith("\n"):
         content += "\n"
+    global LAST_STOCKS_WRITE_T
+    LAST_STOCKS_WRITE_T = time.time()
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
     return stocks
@@ -1541,6 +1550,8 @@ def build_style(settings: dict) -> dict:
         "down": desaturate(_hex_color(settings.get("float_down_color"), pal["down"]), grayness),
         "flat": pal["flat"], "dl": pal["dl"], "header": pal["header"], "sep": pal["sep"],
         "sig_colors": sig_colors,
+        # 异动闪动高亮色: 与背景形成可辨对比但不过刺; 暗色用暖黄、亮色用浅黄
+        "flash": ("#3a3a1e" if theme == "dark" else "#fff3b0"),
         "FONT": (font, size), "FONT_SM": (font, max(5, size - 1)), "ROW_H": 14,
     }
 
@@ -1551,18 +1562,17 @@ def build_style(settings: dict) -> dict:
 def apply_sig_visibility(sf_, visible, sig_pack):
     """仅控制信号行(下半)显隐; 行情行(上半)由调用方保证始终可见, 本函数不碰。
 
-    仅在真实状态变化时操作 pack, 操作后由调用处 update_idletasks 刷新几何。
-    幂等、可重入: 重复调用同状态不会产生多余的 pack/pack_forget。
-    该纯函数不依赖 Tk 主线程, 可直接无头单测(用桩对象记录 pack/pack_forget 调用)。
+    按目标态无条件 apply: 显示则 pack、隐藏则 pack_forget(对已处该状态的 widget 是安全的幂等操作),
+    不依赖 winfo_ismapped()(macOS Tk 上该值对可见控件常返回 False, 会导致隐藏失效)。
+    调用方 _apply_visibility 已用 row_vis != visible 守卫, 仅在真实状态变化时才调用本函数,
+    故不会每轮重复 pack。该纯函数不依赖 Tk 主线程, 可直接无头单测(用桩对象记录 pack/pack_forget 调用)。
     """
     if sf_ is None:
         return
     if visible:
-        if not sf_.winfo_ismapped():
-            sf_.pack(**sig_pack)
+        sf_.pack(**sig_pack)
     else:
-        if sf_.winfo_ismapped():
-            sf_.pack_forget()
+        sf_.pack_forget()
 
 
 def refresh_requires_ban_warning(nxt_sec: int) -> bool:
@@ -1584,7 +1594,7 @@ def format_stock_name(name: str, delayed: bool) -> str:
 
 def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict], None]] = None,
             notifier: Optional[Notifier] = None, cooldown: float = 0.0,
-            stocks_path: Optional[str] = None) -> None:
+            stocks_path: Optional[str] = None, config_path: Optional[str] = None) -> None:
     """构建并运行浮窗; 后台线程按 refresh_sec 取数, 满足省流规则时写CSV/弹通知。
     新增: 暂停/频率控件、暗色样式、Windows 闪烁(flash_fn 注入 notifier)。
     """
@@ -1627,8 +1637,8 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     root.protocol("WM_DELETE_WINDOW", _quit)
 
     # 注意: 以下 header 按钮均用 side="right" 打包, 后打包的更靠左。
-    # 目标左→右顺序: ⚙️设置(最左) → 🔔显示变动 → ＋新增 → ⏸暂停 → {Ns}频率 → ↺刷新
-    # 故 pack 顺序应为从右到左: set_btn → sig_btn → add_btn → pause_btn → freq_btn → refresh_btn
+    # 目标左→右顺序: ⚙️设置(最左) → 🔔显示变动 → ＋新增 → {Ns}频率 → ↺刷新
+    # 故 pack 顺序应为从右到左: set_btn → sig_btn → add_btn → freq_btn → refresh_btn
     # (窗口置顶 📌 已并入设置面板, header 不再保留置顶按钮)
 
     # 立即刷新: ↺ 按钮(点击触发后台立即取数)
@@ -1642,12 +1652,6 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
                         font=style["FONT_SM"], cursor="hand2")
     freq_btn.pack(side="right", padx=(0, 1))
     freq_btn.bind("<Button-1>", lambda e: _cycle_freq())
-
-    # 暂停/继续按钮
-    pause_btn = tk.Label(header, text=" ⏸ ", bg=style["header"], fg=style["fg_dim"],
-                         font=style["FONT_SM"], cursor="hand2")
-    pause_btn.pack(side="right", padx=(0, 1))
-    pause_btn.bind("<Button-1>", lambda e: _toggle_pause())
 
     # 运行时增删自选: ＋ 按钮(功能①)
     add_btn = tk.Label(header, text=" ＋ ", bg=style["header"], fg=style["fg_dim"],
@@ -1690,6 +1694,11 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         w.bind("<ButtonPress-1>", start_drag)
         w.bind("<B1-Motion>", do_drag)
 
+    # 鼠标移开自动淡出, 悬停恢复清晰(B1): 离开窗口降到淡出透明度, 进入恢复用户设定基值。
+    # 注意: 不经由 _apply_alpha(它会持久化并覆盖基值), 直接改 -alpha 属性, 无几何抖动。
+    root.bind("<Enter>", lambda e: root.attributes("-alpha", ui["_alpha_base"]))
+    root.bind("<Leave>", lambda e: root.attributes("-alpha", 0.35))
+
     # ---- 主窗口布局容器: content(顶层 wrapper) 内含 center(中央竖向区) ----
     # 原 left_pane/right_pane 侧列已移除; 设置/添加面板改为 center 内 status 之下的
     # 内联面板, 默认隐藏, 由 ⚙️/＋ 切换显隐, 按 header 图标顺序(⚙️上 / ＋下)竖向堆叠。
@@ -1717,9 +1726,22 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     move_btns: Dict[str, tuple] = {}
     # 删除按钮引用(供「隐藏删除」开关按需 pack_forget/重 pack)
     del_btns: Dict[str, "tk.Label"] = {}
+    # 行情行异动闪动待触发标记: worker 线程写入(异步事件), refresh 主线程消费并真正改背景色
+    # (Tk 非线程安全, 所有 widget.config 必须发生在主线程, 故经 refresh 的 root.after 循环执行)
+    flash_pending: Dict[str, bool] = {}
     ui = {"topmost": bool(settings.get("topmost", True)), "show_signal": True}
+    # 淡出基值: 用户设定的透明度, 鼠标移开淡出后以此还原(不被淡出值覆盖)
+    ui["_alpha_base"] = alpha
+    # 内联面板展开态(显式布尔, 不依赖 winfo_ismapped——macOS Tk 上该值不可信,
+    # 会导致"点 ＋/⚙️ 收不起/重复展开")。_add_stock_dialog/_open_settings_panel/_close_settings 读写。
+    panel_state = {"settings": False, "add": False}
     QUOTE_PACK = dict(fill="x", padx=2, pady=0)
     SIG_PACK = dict(fill="x", padx=4, pady=(0, 0))
+    # 窗口宽度锁定: 首轮 refresh 捕获折叠态(收起面板)宽度并 minsize=maxsize 锁死,
+    # 使设置/添加面板展开时窗口不再被内部控件撑大(始终等于主题窗口宽)。
+    width_locked = {"v": False}
+    # 配置热重载: 记录已处理过的文件 mtime, 仅当 mtime 超过"自身写时间戳 + 缓冲"才视为外部改动
+    cfg_poll = {"stocks_mt": 0.0, "config_mt": 0.0}
 
     # ---- 运行时增删自选 / 信号行可见性控制: 行构建与 UI 回调 ----
     # 以下嵌套函数引用的 body/sigpane/status 等均在 run_hud 后续创建,
@@ -1769,6 +1791,8 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         row_vis[code] = True
         # 右键菜单: 删除该自选(功能①)——保留, 非 macOS 用户仍可用
         f.bind("<Button-3>", lambda e, c=code: _show_remove_menu(e, c))
+        # 左键点击行情行(非工具按钮区域)复制股票代码(B2)
+        f.bind("<Button-1>", lambda e, c=code, t=(del_btn, up_btn, down_btn): _on_row_click(e, c, t))
 
     def _refresh_move_buttons():
         """刷新上移/下移箭头灰显: 首行 up_btn / 末行 down_btn 置为禁用色(与背景同色)。
@@ -1921,6 +1945,43 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         finally:
             menu.grab_release()
 
+    def _copy_code(c: str):
+        """点击行情行: 将股票代码复制到系统剪贴板, 状态栏短暂提示(随下一轮刷新清空)。"""
+        try:
+            root.clipboard_clear()
+            root.clipboard_append(c)
+            status.config(text=f"已复制 {c}")
+            root.update_idletasks()
+        except Exception:
+            pass
+
+    def _on_row_click(e, c, tools):
+        """行情行左键: 点在删除/排序按钮上则放行(由其自身 handler 处理), 其余区域复制代码。"""
+        if e.widget in tools:
+            return
+        _copy_code(c)
+
+    def _flash_row(code: str):
+        """行情行异动闪动: 临时把该行(含所有子 Label)背景设为高亮色, 280ms 后还原。"""
+        f = quote_frames.get(code)
+        if f is None or not f.winfo_exists():
+            return
+        targets = [f] + list(rows.get(code, ()))
+        for w in targets:
+            try:
+                w.config(bg=style["flash"])
+            except Exception:
+                pass
+
+        def _revert():
+            for w in targets:
+                if w.winfo_exists():
+                    try:
+                        w.config(bg=style["bg"])
+                    except Exception:
+                        pass
+        root.after(280, _revert)
+
     def _toggle_topmost():
         """切换窗口置顶(always-on-top)(功能④)。
 
@@ -1946,11 +2007,15 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         if not add_panel_built["done"]:
             _build_add_panel()
             add_panel_built["done"] = True
-        if add_inline.winfo_ismapped():
+        if panel_state["add"]:
             add_inline._close()          # 再次点击 ＋ -> 收起并重置
+            panel_state["add"] = False
         else:
-            add_inline.pack(after=(settings_inline if settings_inline.winfo_ismapped() else status),
+            # 钉宽度 = 当前主题窗口宽(收起态), 避免面板内部控件把 shrink-to-fit 窗口撑大
+            add_inline.config(width=root.winfo_width())
+            add_inline.pack(after=(settings_inline if panel_state["settings"] else status),
                             fill="x")
+            panel_state["add"] = True
             root.update_idletasks()
 
     def _build_add_panel():
@@ -2211,14 +2276,8 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     last_sigs: Dict[str, dict] = {}            # code -> {sig, 阈值状态, last_price, ...}
     lock = threading.Lock()
     # 共享状态(后台线程读/主线程写; 单键原子操作在 CPython 下安全)
-    state = {"paused": False, "refresh_sec": refresh_sec}
+    state = {"refresh_sec": refresh_sec}
     refresh_event = threading.Event()   # ↺ 立即刷新信号
-
-    def _toggle_pause():
-        state["paused"] = not state["paused"]
-        pause_btn.config(text=" ▶ " if state["paused"] else " ⏸ ")
-        if state["paused"]:
-            status.config(text="⏸ 已暂停")
 
     def _force_refresh():
         """↺ 立即触发一次后台取数(获取最新行情)。"""
@@ -2247,21 +2306,17 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         ui["show_signal"] = not ui["show_signal"]
         on = ui["show_signal"]
         # 整块显隐: 分隔线 / 信号标题 / 信号容器
-        # winfo_ismapped 守卫避免重复 pack; before=status 维持原始上下顺序(否则布局错乱)
+        # 按 on 直接 pack/pack_forget(pack 对已映射控件幂等, pack_forget 对未映射是无操作),
+        # 不依赖 winfo_ismapped()(macOS Tk 上该值不可信, 会导致该隐不隐/该显不显)。
+        # before=status 维持原始上下顺序(否则布局错乱)。
         if on:
-            if not sep.winfo_ismapped():
-                sep.pack(fill="x", padx=4, pady=1, before=status)
-            if not sighead.winfo_ismapped():
-                sighead.pack(fill="x", padx=4, pady=(0, 0), before=status)
-            if not sigpane.winfo_ismapped():
-                sigpane.pack(fill="x", before=status)
+            sep.pack(fill="x", padx=4, pady=1, before=status)
+            sighead.pack(fill="x", padx=4, pady=(0, 0), before=status)
+            sigpane.pack(fill="x", before=status)
         else:
-            if sep.winfo_ismapped():
-                sep.pack_forget()
-            if sighead.winfo_ismapped():
-                sighead.pack_forget()
-            if sigpane.winfo_ismapped():
-                sigpane.pack_forget()
+            sep.pack_forget()
+            sighead.pack_forget()
+            sigpane.pack_forget()
         # 各股票信号行按 show_signal + is_row_visible 联合判定
         for st in stocks:
             c = st["code"]
@@ -2287,10 +2342,14 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         if not settings_panel_built["done"]:
             _build_settings_panel()
             settings_panel_built["done"] = True
-        if settings_inline.winfo_ismapped():
+        if panel_state["settings"]:
             settings_inline.pack_forget()          # 再次点击 ⚙️ -> 收起
+            panel_state["settings"] = False
         else:
+            # 钉宽度 = 当前主题窗口宽(收起态), 避免面板内部控件比行情行宽时把 shrink-to-fit 窗口撑大
+            settings_inline.config(width=root.winfo_width())
             settings_inline.pack(after=status, fill="x")
+            panel_state["settings"] = True
             root.update_idletasks()
 
     def _build_settings_panel():
@@ -2335,6 +2394,9 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         toggles_grid.pack(fill="x", padx=8, pady=4)
         toggles_grid.columnconfigure(0, weight=1)
         toggles_grid.columnconfigure(1, weight=1)
+        # 按钮换行宽度: 按当前窗口半宽(锁定后=主题宽)计算, 防止锁定宽度后长文案(如"隐藏排序：开")
+        # 被截断; 超出则自动换行而非撑大窗口。
+        _wl = max(40, (root.winfo_width() or 200) // 2 - 20)
 
         # --- 变动消息提示开关(控制 OS 弹框+声音, 持久化) ---
         def _toggle_notify():
@@ -2344,12 +2406,12 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             _save_config_key("notify", on)
             _save_config_key("notify_sound", on)
             notify_toggle.config(
-                text=("📢 变动消息：开" if on else "🔇 变动消息：关"))
+                text=("变动消息：开" if on else "变动消息：关"))
         notify_toggle = tk.Button(
             toggles_grid,
-            text=("📢 变动消息：开" if notifier.enabled else "🔇 变动消息：关"),
+            text=("变动消息：开" if notifier.enabled else "变动消息：关"),
             bg=style["bg"], fg=style["fg"], font=style["FONT_SM"],
-            cursor="hand2", relief="flat", padx=6, pady=2)
+            cursor="hand2", relief="flat", padx=6, pady=2, wraplength=_wl)
         notify_toggle.config(command=_toggle_notify)
         notify_toggle.grid(row=0, column=1, padx=4, pady=4, sticky="ew")
 
@@ -2358,12 +2420,12 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             _toggle_topmost()
             on = ui["topmost"]
             top_panel_toggle.config(
-                text=("📌 窗口置顶：开" if on else "📍 窗口置顶：关"))
+                text=("窗口置顶：开" if on else "窗口置顶：关"))
         top_panel_toggle = tk.Button(
             toggles_grid,
-            text=("📌 窗口置顶：开" if ui["topmost"] else "📍 窗口置顶：关"),
+            text=("窗口置顶：开" if ui["topmost"] else "窗口置顶：关"),
             bg=style["bg"], fg=style["fg"], font=style["FONT_SM"],
-            cursor="hand2", relief="flat", padx=6, pady=2)
+            cursor="hand2", relief="flat", padx=6, pady=2, wraplength=_wl)
         top_panel_toggle.config(command=_toggle_topmost_panel)
         top_panel_toggle.grid(row=0, column=0, padx=4, pady=4, sticky="ew")
 
@@ -2373,13 +2435,13 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             settings["hide_sort"] = new
             _save_config_key("hide_sort", new)
             hide_sort_toggle.config(
-                text=("🙈 隐藏排序：开" if new else "👀 显示排序：关"))
+                text=("隐藏排序：开" if new else "显示排序：关"))
             _apply_row_tools_visibility()
         hide_sort_toggle = tk.Button(
             toggles_grid,
-            text=("🙈 隐藏排序：开" if settings.get("hide_sort", False) else "👀 显示排序：关"),
+            text=("隐藏排序：开" if settings.get("hide_sort", False) else "显示排序：关"),
             bg=style["bg"], fg=style["fg"], font=style["FONT_SM"],
-            cursor="hand2", relief="flat", padx=6, pady=2)
+            cursor="hand2", relief="flat", padx=6, pady=2, wraplength=_wl)
         hide_sort_toggle.config(command=_toggle_hide_sort)
         hide_sort_toggle.grid(row=1, column=0, padx=4, pady=4, sticky="ew")
 
@@ -2389,13 +2451,13 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             settings["hide_del"] = new
             _save_config_key("hide_del", new)
             hide_del_toggle.config(
-                text=("🙈 隐藏删除：开" if new else "👀 显示删除：关"))
+                text=("隐藏删除：开" if new else "显示删除：关"))
             _apply_row_tools_visibility()
         hide_del_toggle = tk.Button(
             toggles_grid,
-            text=("🙈 隐藏删除：开" if settings.get("hide_del", False) else "👀 显示删除：关"),
+            text=("隐藏删除：开" if settings.get("hide_del", False) else "显示删除：关"),
             bg=style["bg"], fg=style["fg"], font=style["FONT_SM"],
-            cursor="hand2", relief="flat", padx=6, pady=2)
+            cursor="hand2", relief="flat", padx=6, pady=2, wraplength=_wl)
         hide_del_toggle.config(command=_toggle_hide_del)
         hide_del_toggle.grid(row=1, column=1, padx=4, pady=4, sticky="ew")
 
@@ -2407,8 +2469,10 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             之后, 一并重排回 status 之后, 避免折叠顺序错乱。
             """
             settings_inline.pack_forget()
-            if add_inline is not None and add_inline.winfo_ismapped():
+            panel_state["settings"] = False
+            if add_inline is not None and panel_state["add"]:
                 add_inline.pack_forget()
+                add_inline.config(width=root.winfo_width())
                 add_inline.pack(after=status, fill="x")
             root.update_idletasks()
 
@@ -2437,6 +2501,7 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             root.attributes("-alpha", v)
             nonlocal alpha
             alpha = v
+            ui["_alpha_base"] = v                  # 同步淡出基值, 淡出后以此还原
             settings["float_alpha"] = v
             _save_config_key("float_alpha", v)
         _run_with_guard(_style_busy, _work)
@@ -2497,7 +2562,7 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             sbb.configure(fg=style["fg_dim"])
             # sdot 语义色保持 sig_colors(由刷新循环按信号着色, 此处不动)
         # header 按钮(统一底色 + dim 高亮; 特殊高亮由各 toggle 自管)
-        for btn in (freq_btn, pause_btn, add_btn, set_btn):
+        for btn in (freq_btn, add_btn, set_btn):
             btn.configure(bg=style["header"], fg=style["fg_dim"])
         root.update_idletasks()
 
@@ -2523,18 +2588,88 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     if notifier is not None:
         notifier.flash_fn = flash_fn
 
+    # ---- 配置热重载(B5): 后台线程轮询 stocks.toml / config.toml 的 mtime, ----
+    # 发现"外部编辑"(mtime 超过自身写时间戳 + 缓冲)时, 经 root.after(0, ...) 在主线程安全重载,
+    # 避免 Tk 跨线程调用崩溃。重载本身不写文件(绕开 _apply_alpha/_apply_grayness 的持久化分支),
+    # 故不会触发自身写 -> 无重载循环。
+    def _reload_settings():
+        """主线程执行: 重新读取并应用 [settings](外观/开关), 不回写文件。"""
+        nonlocal alpha, style
+        new = load_settings()
+        for k in ("float_alpha", "grayness", "topmost", "show_signal",
+                  "hide_sort", "hide_del", "notify", "float_theme",
+                  "float_font", "float_font_size", "refresh_sec"):
+            if k in new:
+                settings[k] = new[k]
+        # 透明度(直接改属性, 不持久化, 不覆盖基值逻辑之外的东西)
+        v = max(0.30, min(1.0, _to_float(settings.get("float_alpha")) or 1.0))
+        root.attributes("-alpha", v)
+        alpha = v
+        ui["_alpha_base"] = v
+        # 灰度(重算 style + 重刷配色, 不持久化)
+        style = build_style(settings)
+        _reapply_style()
+        # 置顶
+        set_topmost(root, bool(settings.get("topmost", True)))
+        ui["topmost"] = bool(settings.get("topmost", True))
+        # 信号提示开关同步
+        ns = bool(settings.get("show_signal", True))
+        if ns != ui["show_signal"]:
+            _toggle_signal()
+        # 隐藏排序/删除开关同步
+        _apply_row_tools_visibility()
+
+    def _reload_stocks():
+        """主线程执行: 重新读取 stocks.toml, 增量增删 + 按新顺序重排行情行, 不回写文件。"""
+        new = load_stocks(settings)
+        new_codes = [s["code"] for s in new]
+        old_set = set(quote_frames.keys())
+        new_set = set(new_codes)
+        # 删除已不在列表的(会触发 rewrite_stocks_toml -> 置 LAST_STOCKS_WRITE_T, 被守卫屏蔽)
+        for code in old_set - new_set:
+            _remove_stock(code)
+        # 新增
+        for s in new:
+            if s["code"] not in old_set:
+                _build_quote_row(s)
+        # 按新顺序重排行情行(重新 pack 到父容器末尾, 维持新序)
+        for s in new:
+            f = quote_frames.get(s["code"])
+            if f is not None and f.winfo_exists():
+                f.pack(**QUOTE_PACK)
+        stocks[:] = new
+        _apply_row_tools_visibility()
+        _refresh_move_buttons()
+
+    def _check_reload():
+        """守护线程执行: 仅做 mtime 判定, 真正的 UI 重载经 root.after(0,...) 调度到主线程。"""
+        do_stocks = False
+        do_config = False
+        if stocks_path and os.path.exists(stocks_path):
+            mt = os.path.getmtime(stocks_path)
+            if mt > cfg_poll["stocks_mt"] + 0.01 and mt > LAST_STOCKS_WRITE_T + 0.5:
+                cfg_poll["stocks_mt"] = mt
+                do_stocks = True
+        if config_path and os.path.exists(config_path):
+            mt = os.path.getmtime(config_path)
+            if mt > cfg_poll["config_mt"] + 0.01 and mt > LAST_CONFIG_WRITE_T + 0.5:
+                cfg_poll["config_mt"] = mt
+                do_config = True
+        if do_stocks:
+            root.after(0, _reload_stocks)
+        if do_config:
+            root.after(0, _reload_settings)
+
+    def _watcher():
+        while True:
+            time.sleep(2)
+            try:
+                _check_reload()
+            except Exception:
+                pass
+
     def worker():
         while True:
-            force = refresh_event.is_set()
-            if force:
-                refresh_event.clear()
-            if state.get("paused") and not force:
-                # 暂停态: 用 Event.wait 替代裸 sleep, 使 ↺ 能即时唤醒并强制取数一次
-                if refresh_event.wait(timeout=state.get("refresh_sec", 1)):
-                    refresh_event.clear()
-                    # 被 ↺ 唤醒: 不 continue, 落到下方立即取数一次(暂停态保持)
-                else:
-                    continue
             # 运行时增删: 每轮快照 stocks, 支持新增/删除自选(功能①)
             cur_stocks = list(stocks)
             codes = [s["code"] for s in cur_stocks]
@@ -2637,6 +2772,10 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
                     "sr_alert_at": (now_t if sr_notify else (prev.get("sr_alert_at") if isinstance(prev, dict) else None)),
                     "last_price": price,
                 }
+                # 行情行异动闪动(B6): 真实变动(非首屏)才闪, 避免启动瞬间全屏闪。
+                # 仅置标记, 真正改背景色由主线程 refresh 经 _flash_row 执行(Tk 线程安全)。
+                if trigger and prev is not None:
+                    flash_pending[code] = True
             with lock:
                 data.update(new)
             if refresh_event.wait(timeout=state.get("refresh_sec", 1)):
@@ -2647,6 +2786,18 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             snap = dict(data)
             sig_changes = dict(last_sig_change)
         offline = not snap
+        # 窗口宽度锁定(宽度整改): 首轮 refresh 时窗口已 realize, 捕获折叠态(面板收起)宽度并
+        # minsize=maxsize 锁死, 使设置/添加面板展开时窗口不再被内部控件撑大(始终等于主题窗口宽)。
+        if not width_locked["v"]:
+            w = root.winfo_width()
+            if w and w > 0:
+                # 只锁宽度(min/max 均=w), 高度完全放行:
+                # - min height=1: 允许窗口随内容收缩, 否则首轮刷新把"信号区全撑开"的虚高锁进
+                #   minsize, 信号行隐藏后窗口缩不回去, 表现为"没数据高度也撑很大";
+                # - max height=100000: 允许设置/添加面板展开时正常增高(不误伤内容撑高)。
+                root.minsize(w, 1)
+                root.maxsize(w, 100000)
+            width_locked["v"] = True
         for st in stocks:
             code = st["code"]
             # 信号行(下半)默认只展示有信号变动的股票; 信号提示关闭时一律隐藏(运行时态短路)
@@ -2684,12 +2835,22 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
                 sbb.config(text=f"{fmt_ts(r.get('ts',''))}数据", fg=style["dl"])
             else:
                 sbb.config(text=f"多{bull}空{bear}" if isinstance(bull, int) else "", fg=style["flat"])
-        if not state.get("paused"):
-            status.config(text=("● 实时  ·  " + str(state.get("refresh_sec", 1)) + "s" if not offline else "○ 离线(显示上次)  ·  重试中"))
+            # 行情行异动闪动(B6): 消费 worker 置的标记, 在主线程安全改背景色(280ms 后还原)
+            if flash_pending.pop(code, False):
+                _flash_row(code)
+        # 不再常驻显示「● 实时 · Ns」; 正常态清空状态栏(临时提示约 250ms 后随下一轮刷新自然消失),
+        # 仅离线时给出提示, 避免窗口常驻冗余信息。
+        if offline:
+            status.config(text="○ 离线(显示上次)  ·  重试中")
+        else:
+            status.config(text="")
         root.after(250, refresh)
 
     t = threading.Thread(target=worker, daemon=True)
     t.start()
+    # 配置热重载守护线程(B5): 每 2s 轮询文件 mtime, 外部改动时主线程安全重载
+    tw = threading.Thread(target=_watcher, daemon=True)
+    tw.start()
     root.after(250, refresh)
     root.mainloop()
 
@@ -2741,6 +2902,9 @@ def main() -> None:
     # 解析 stocks.toml 实际路径(供运行时增删回写; 无文件则仅内存生效, 不自动创建)
     res_st = _load_first(STOCKS_CANDIDATES)
     stocks_path = res_st[0] if res_st is not None else None
+    # 配置热重载(B5): 解析 config.toml 实际路径, 供运行时检测外部编辑并重载 [settings]
+    res_cfg = _load_first(SETTINGS_CANDIDATES)
+    config_path = res_cfg[0] if res_cfg is not None else None
 
     # 阈值冷却(分钟, 默认 15; 0 关闭)
     cooldown = _to_float(settings.get("alert_cooldown", 15)) or 0.0
@@ -2763,7 +2927,8 @@ def main() -> None:
             log_fn=(do_log if log else None),
             notifier=notifier,
             cooldown=cooldown,
-            stocks_path=stocks_path)
+            stocks_path=stocks_path,
+            config_path=config_path)
 
 
 if __name__ == "__main__":
