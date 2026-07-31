@@ -60,6 +60,16 @@ for f in config.toml stocks.toml; do
   fi
 done
 
+# ---- 同步最新主程序: 打包源 = 仓库根 stock_float.py(避免双份源码漂移) ----
+if [ -f "../stock_float.py" ]; then
+  cp "../stock_float.py" stock_float.py
+  echo "▶ 已同步 ../stock_float.py -> stock_float.py"
+fi
+if [ ! -f "stock_float.py" ]; then
+  echo "✗ 缺少 stock_float.py(boot.py 依赖它), 请从仓库根目录复制后重试"
+  exit 1
+fi
+
 APP_NAME=股票浮窗
 
 echo "▶ 生成图标 icns ..."

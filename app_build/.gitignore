@@ -1,7 +1,9 @@
 # app_build/ —— 打包工具专用忽略规则
 # 真实配置(含自选股, 隐私)与构建产物不入库; 图标为生成产物, 入库方便直接构建
+# stock_float.py 由构建脚本从仓库根自动同步(避免双份源码漂移), 不入库
 config.toml
 stocks.toml
+stock_float.py
 build/
 dist/
 *.spec

@@ -65,6 +65,17 @@ for %%F in (config.toml stocks.toml) do (
   )
 )
 
+rem ---- 3.5) 同步最新主程序: 打包源 = 仓库根 stock_float.py(避免双份源码漂移) ----
+if exist "..\stock_float.py" (
+  copy /Y "..\stock_float.py" "stock_float.py" >nul
+  echo [提示] 已同步 ..\stock_float.py -^> stock_float.py
+)
+if not exist "stock_float.py" (
+  echo [错误] 缺少 stock_float.py(boot.py 依赖它), 请从仓库根目录复制后重试。
+  pause
+  exit /b 1
+)
+
 rem ---- 4) 安装 PyInstaller (官方源失败则用清华镜像) ----
 echo [4/4] 检查 / 安装 PyInstaller ...
 %PY% -m pip show pyinstaller >nul 2>nul

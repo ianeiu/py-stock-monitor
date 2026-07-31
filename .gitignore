@@ -20,6 +20,9 @@ QA_TEST_REPORT_stock_float.md
 __pycache__/
 *.pyc
 
+# ---- 打包产物 (app_build 构建输出, 体积大不入库) ----
+发布/
+
 # ---- 编辑器 / 系统 ----
 *.swp
 *~
