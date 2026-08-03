@@ -807,7 +807,8 @@ class FakeWidget:
             self._padx = kwargs["padx"]
 
 
-def _apply_row_tools_visibility_logic(move_btns, del_btns, hide_sort, hide_del):
+def _apply_row_tools_visibility_logic(move_btns, del_btns, hide_sort, hide_del,
+                                      param_btns=None, hide_param=False):
     """移植自 run_hud._apply_row_tools_visibility 的纯判定逻辑(去 Tk/root)。
 
     采用「宽度折叠」而非 pack_forget/pack: 隐藏时清文本+宽度0+内边距0(水平空间塌缩为0),
@@ -816,6 +817,9 @@ def _apply_row_tools_visibility_logic(move_btns, del_btns, hide_sort, hide_del):
 
     防御: 遍历前用 winfo_exists() 跳过已 destroy 的残留引用(否则对已销毁 widget 调
     .config() 抛 TclError: invalid command name)——与真实源码行为一致。
+
+    param_btns/hide_param: 个股参数按钮(⚙)显隐, 与 hide_sort/hide_del 同款宽度折叠;
+    默认 None/False 以兼容既有调用点。
     """
     for code, (up_btn, down_btn) in list(move_btns.items()):
         if not up_btn.winfo_exists():
@@ -834,6 +838,14 @@ def _apply_row_tools_visibility_logic(move_btns, del_btns, hide_sort, hide_del):
             del_btn.config(text="", width=0, padx=0)
         else:
             del_btn.config(text=del_btn._orig_text, width=0, padx=del_btn._orig_padx)
+    for code, param_btn in (param_btns or {}).items():
+        if not param_btn.winfo_exists():
+            param_btns.pop(code, None)
+            continue
+        if hide_param:
+            param_btn.config(text="", width=0, padx=0)
+        else:
+            param_btn.config(text=param_btn._orig_text, width=0, padx=param_btn._orig_padx)
 
 
 class TestRowToolsVisibilityGuard(unittest.TestCase):
@@ -888,6 +900,25 @@ class TestRowToolsVisibilityGuard(unittest.TestCase):
         for del_btn in del_btns.values():
             self.assertEqual(del_btn.cget("text"), del_btn._orig_text)
             self.assertEqual(del_btn.cget("padx"), del_btn._orig_padx)
+
+    def test_hide_param_toggles_gear_button(self):
+        """hide_param=True -> ⚙ 参数按钮文本塌缩(padx=0, 不碰 pack 几何); 切回 False -> 还原。"""
+        move_btns, del_btns = self._make_rows()
+        param_btns = {"A": self._make_rows()[1]["A"], "B": self._make_rows()[1]["B"]}
+        for w in param_btns.values():
+            w._orig_text = "⚙"
+            w._orig_padx = (0, 1)
+        _apply_row_tools_visibility_logic(move_btns, del_btns, hide_sort=False, hide_del=False,
+                                          param_btns=param_btns, hide_param=True)
+        for pb in param_btns.values():
+            self.assertEqual(pb.cget("text"), "")
+            self.assertEqual(pb.cget("padx"), 0)
+            self.assertEqual(pb.pack_calls + pb.forget_calls, 0)
+        _apply_row_tools_visibility_logic(move_btns, del_btns, hide_sort=False, hide_del=False,
+                                          param_btns=param_btns, hide_param=False)
+        for pb in param_btns.values():
+            self.assertEqual(pb.cget("text"), pb._orig_text)
+            self.assertEqual(pb.cget("padx"), pb._orig_padx)
 
     def test_apply_collapses_text_even_when_macos_ismapped_broken(self):
         """无论 winfo_ismapped 返回什么(模拟 macOS 永远 False), hide 仍通过宽度折叠真正生效,
@@ -1173,6 +1204,15 @@ class TestRowToolsVisibilitySourceContract(unittest.TestCase):
             self._calls_attr(self._nested["_apply_row_tools_visibility"], ("winfo_exists",)),
             "回归: _apply_row_tools_visibility 未做 winfo_exists 防御(删除股票后残留引用会崩溃)",
         )
+
+    def test_apply_row_tools_visibility_handles_hide_param(self):
+        """锁定 hide_param(⚙ 参数按钮显隐)分支: 源码必须遍历 param_btns 并读取 hide_param 配置。"""
+        node = self._nested["_apply_row_tools_visibility"]
+        names = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+        self.assertIn("param_btns", names, "回归: _apply_row_tools_visibility 未处理 param_btns(⚙ 按钮)")
+        self.assertIn("hide_param", names, "回归: _apply_row_tools_visibility 未读取 hide_param 配置")
+        self.assertIn("hide_sort", names, "回归: 原 hide_sort 分支被移除")
+        self.assertIn("hide_del", names, "回归: 原 hide_del 分支被移除")
 
     def test_refresh_move_buttons_guards_destroyed_widgets(self):
         """锁定防御③: _refresh_move_buttons 遍历前也必须用 winfo_exists() 跳过已销毁 widget。"""

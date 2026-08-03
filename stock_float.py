@@ -1870,7 +1870,7 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             down_btn.config(fg=(style["bg"] if i == n - 1 else style["fg_dim"]))
 
     def _apply_row_tools_visibility():
-        """按 settings 的 hide_sort/hide_del 即时显隐行情行的排序箭头与删除按钮。
+        """按 settings 的 hide_sort/hide_del/hide_param 即时显隐行情行右侧工具按钮(排序/删除/参数)。
 
         采用「宽度折叠」而非 pack_forget/pack: 隐藏时清文本+宽度0+内边距0(水平空间塌缩为0),
         显示时还原原始文本/内边距。macOS Tk 上反复 pack_forget/pack 偶发「第二次隐藏失效」,
@@ -1878,6 +1878,7 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         """
         hide_sort = bool(settings.get("hide_sort", False))
         hide_del = bool(settings.get("hide_del", False))
+        hide_param = bool(settings.get("hide_param", False))
         for code, (up_btn, down_btn) in list(move_btns.items()):
             # 防御: 跳过已被 destroy 的残留引用(如极端情况下删除股票后未清理干净的 code),
             # 避免对已销毁 widget 调 .config() 抛 TclError: invalid command name
@@ -1897,6 +1898,14 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
                 del_btn.config(text="", width=0, padx=0)
             else:
                 del_btn.config(text=del_btn._orig_text, width=0, padx=del_btn._orig_padx)
+        for code, param_btn in list(param_btns.items()):
+            if not param_btn.winfo_exists():
+                param_btns.pop(code, None)
+                continue
+            if hide_param:
+                param_btn.config(text="", width=0, padx=0)
+            else:
+                param_btn.config(text=param_btn._orig_text, width=0, padx=param_btn._orig_padx)
         # 运行时关闭「隐藏排序」后, 立即刷新首行 up / 末行 down 的边界灰显。
         # 不依赖 winfo_ismapped, 且 _refresh_move_buttons 不回调本函数, 故无递归风险。
         if not hide_sort:
@@ -2704,6 +2713,22 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             cursor="hand2", relief="flat", padx=6, pady=2, wraplength=_wl)
         hide_del_toggle.config(command=_toggle_hide_del)
         hide_del_toggle.grid(row=1, column=1, padx=4, pady=4, sticky="ew")
+
+        # --- 隐藏参数按钮开关(持久化 hide_param, 控制行情行右侧 ⚙ 是否显示) ---
+        def _toggle_hide_param():
+            new = not bool(settings.get("hide_param", False))
+            settings["hide_param"] = new
+            _save_config_key("hide_param", new)
+            hide_param_toggle.config(
+                text=("隐藏参数按钮：开" if new else "显示参数按钮：关"))
+            _apply_row_tools_visibility()
+        hide_param_toggle = tk.Button(
+            toggles_grid,
+            text=("隐藏参数按钮：开" if settings.get("hide_param", False) else "显示参数按钮：关"),
+            bg=style["bg"], fg=style["fg"], font=style["FONT_SM"],
+            cursor="hand2", relief="flat", padx=6, pady=2, wraplength=_wl)
+        hide_param_toggle.config(command=_toggle_hide_param)
+        hide_param_toggle.grid(row=2, column=0, padx=4, pady=4, sticky="ew")
 
         def _close_settings():
             """点击收起: 隐藏设置面板并刷新几何。
