@@ -2119,6 +2119,113 @@ name = "Y"
 
 
 # ----------------------------------------------------------------------------
+# 19b. 个股参数面板(功能④): 文本解析纯函数 + rewrite_stocks_toml 个股更新分支
+# ----------------------------------------------------------------------------
+class TestParseParamText(unittest.TestCase):
+    def test_parse_levels_txt(self):
+        # 空 / 纯空白 -> None(不配置)
+        self.assertIsNone(sf.parse_levels_txt(""))
+        self.assertIsNone(sf.parse_levels_txt("   "))
+        # 逗号分隔(含中英文逗号容错不需要, 仅英文逗号)多价位
+        self.assertEqual(sf.parse_levels_txt("18.0, 17.5"), [18.0, 17.5])
+        self.assertEqual(sf.parse_levels_txt("18,17.5"), [18.0, 17.5])
+        # 全非法 -> None
+        self.assertIsNone(sf.parse_levels_txt("abc"))
+        # 部分非法 -> 只取合法项
+        self.assertEqual(sf.parse_levels_txt("18.0, abc"), [18.0])
+
+    def test_parse_pct_txt(self):
+        self.assertIsNone(sf.parse_pct_txt(""))
+        self.assertEqual(sf.parse_pct_txt("3.5"), 3.5)
+        self.assertEqual(sf.parse_pct_txt("0"), 0.0)
+        self.assertIsNone(sf.parse_pct_txt("-1"))     # 负数视为不配置
+        self.assertIsNone(sf.parse_pct_txt("abc"))    # 非法视为不配置
+
+
+class TestRewriteStocksTomlUpdate(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.path = Path(self.tmp) / "stocks.toml"
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write(self, content):
+        self.path.write_text(content, encoding="utf-8")
+
+    def _base(self):
+        return '''# 顶部注释保留
+[settings]
+chg_alert = 3.0
+
+[[stocks]]
+code = "hk01810"
+name = "小米集团-W"
+
+[[stocks]]
+code = "sh600519"
+name = "贵州茅台"
+'''
+
+    def test_update_params_writes_and_preserves_others(self):
+        self._write(self._base())
+        p = str(self.path)
+        result = sf.rewrite_stocks_toml(
+            p, update_code="hk01810",
+            update_data={"support": [18.0, 17.5], "resistance": [20.5],
+                         "chg_alert": 2.5, "swing_alert": 4.0})
+        # 返回列表: 目标股四参数已更新
+        st = next(s for s in result if s["code"] == "hk01810")
+        self.assertEqual(st["support"], [18.0, 17.5])
+        self.assertEqual(st["resistance"], [20.5])
+        self.assertEqual(st["chg_alert"], 2.5)
+        self.assertEqual(st["swing_alert"], 4.0)
+        # 其它股票不受影响(不附带任何参数键)
+        others = [s for s in result if s["code"] != "hk01810"]
+        for o in others:
+            for k in ("support", "resistance", "chg_alert", "swing_alert"):
+                self.assertNotIn(k, o)
+        # 文件回读一致 + 头注释/[settings] 保留
+        raw = self.path.read_text(encoding="utf-8")
+        self.assertIn("# 顶部注释保留", raw)
+        self.assertEqual(raw.count("[settings]"), 1)
+        parsed = sf.tomllib.loads(raw)
+        st2 = next(s for s in parsed["stocks"] if s["code"] == "hk01810")
+        self.assertEqual(st2["support"], [18.0, 17.5])
+        self.assertEqual(st2["resistance"], [20.5])
+        self.assertEqual(st2["chg_alert"], 2.5)
+        self.assertEqual(st2["swing_alert"], 4.0)
+        self.assertEqual(parsed["settings"]["chg_alert"], 3.0)   # 全局阈值不动
+
+    def test_update_clear_fields_removes_keys(self):
+        self._write(self._base() + '''[[stocks]]
+code = "usAAPL"
+name = "苹果"
+support = [100.0]
+chg_alert = 1.0
+''')
+        p = str(self.path)
+        result = sf.rewrite_stocks_toml(
+            p, update_code="usAAPL",
+            update_data={"support": None, "resistance": None,
+                         "chg_alert": None, "swing_alert": None})
+        st = next(s for s in result if s["code"] == "usAAPL")
+        for k in ("support", "resistance", "chg_alert", "swing_alert"):
+            self.assertNotIn(k, st)
+        # 文件层面: usAAPL 块不再含这些键
+        parsed = sf.tomllib.loads(self.path.read_text(encoding="utf-8"))
+        st2 = next(s for s in parsed["stocks"] if s["code"] == "usAAPL")
+        for k in ("support", "resistance", "chg_alert", "swing_alert"):
+            self.assertNotIn(k, st2)
+
+    def test_update_unknown_code_noop(self):
+        self._write(self._base())
+        result = sf.rewrite_stocks_toml(
+            str(self.path), update_code="nonexist", update_data={"chg_alert": 1.0})
+        self.assertEqual([s["code"] for s in result], ["hk01810", "sh600519"])
+
+
+# ----------------------------------------------------------------------------
 # N. 刷新频率切换是否需要「可能被 ban」确认框 (纯函数, 无头直测)
 # ----------------------------------------------------------------------------
 class TestRefreshBanWarning(unittest.TestCase):

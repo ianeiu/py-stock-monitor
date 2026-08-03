@@ -137,6 +137,22 @@ def _to_float(x) -> Optional[float]:
         return None
 
 
+def parse_levels_txt(s: str) -> Optional[List[float]]:
+    """解析支撑/压力位输入(逗号分隔数值列表)。空白 = None(不配置); 全部非法 = None; 部分非法只取合法项。"""
+    if not s or not s.strip():
+        return None
+    vals = [x for x in (_to_float(p) for p in s.split(",")) if x is not None]
+    return vals or None
+
+
+def parse_pct_txt(s: str) -> Optional[float]:
+    """解析变动/波动提示输入(%)。空白 = None(不配置, 回退全局); 非法或负数 = None。"""
+    if not s or not s.strip():
+        return None
+    v = _to_float(s)
+    return v if v is not None and v >= 0 else None
+
+
 def fmt_chg(chg) -> str:
     """把涨跌幅格式化为字符串(纯文本, 供通知/回看用)。"""
     v = _to_float(chg)
@@ -1143,13 +1159,18 @@ def _serialize_stocks(stocks: List[dict]) -> str:
 
 def rewrite_stocks_toml(path: str, add: Optional[dict] = None,
                         remove: Optional[str] = None,
-                        reorder: Optional[List[str]] = None) -> List[dict]:
+                        reorder: Optional[List[str]] = None,
+                        update_code: Optional[str] = None,
+                        update_data: Optional[dict] = None) -> List[dict]:
     """功能① 保留式重写 stocks.toml: 保留文件头注释与 [settings] 段, 仅重写 [[stocks]] 区块。
 
     - add: parse_add_input 返回的 stock dict(或含 code/name 的 dict); 若 code 已存在则忽略(去重)。
     - remove: 要删除的股票 code。
     - reorder: 可选, 给定 code 顺序列表, 在序列化前据此重排 stocks
       (不在列表中的 code 保持原相对序追加于末尾)。add/remove 调用方不传, 保持向后兼容。
+    - update_code + update_data: 可选, 更新指定 code 的个股参数(support/resistance/chg_alert/
+      swing_alert)。update_data 中值为 None 的键 = 移除该字段(不写入, 重启后回退全局/无配置);
+      值非 None 则写入。
     返回最终生效的股票列表(List[dict], 经 _normalize)。文件不存在 / 无法解析 -> 抛异常。
     """
     if tomllib is None:
@@ -1173,6 +1194,18 @@ def rewrite_stocks_toml(path: str, add: Optional[dict] = None,
             if add.get("swing_alert") is not None:
                 new_stock["swing_alert"] = add["swing_alert"]
             stocks.append(new_stock)
+    if update_code is not None and update_data:
+        for s in stocks:
+            if s.get("code") != update_code:
+                continue
+            for k in ("support", "resistance", "chg_alert", "swing_alert"):
+                if k not in update_data:
+                    continue
+                if update_data[k] is None:
+                    s.pop(k, None)          # 清空 = 移除字段(重启回退全局/无配置)
+                else:
+                    s[k] = update_data[k]
+            break
     if reorder is not None:
         stocks = _reorder_stocks(stocks, reorder)
     prefix = _extract_toml_prefix(raw)
@@ -1731,6 +1764,8 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     move_btns: Dict[str, tuple] = {}
     # 删除按钮引用(供「隐藏删除」开关按需 pack_forget/重 pack)
     del_btns: Dict[str, "tk.Label"] = {}
+    # 个股参数按钮引用(⚙, 打开该股 support/resistance/chg_alert/swing_alert 配置面板)
+    param_btns: Dict[str, "tk.Label"] = {}
     # 行情行异动闪动待触发标记: worker 线程写入(异步事件), refresh 主线程消费并真正改背景色
     # (Tk 非线程安全, 所有 widget.config 必须发生在主线程, 故经 refresh 的 root.after 循环执行)
     flash_pending: Dict[str, bool] = {}
@@ -1738,8 +1773,9 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     # 淡出基值: 用户设定的透明度, 鼠标移开淡出后以此还原(不被淡出值覆盖)
     ui["_alpha_base"] = alpha
     # 内联面板展开态(显式布尔, 不依赖 winfo_ismapped——macOS Tk 上该值不可信,
-    # 会导致"点 ＋/⚙️ 收不起/重复展开")。_add_stock_dialog/_open_settings_panel/_close_settings 读写。
-    panel_state = {"settings": False, "add": False}
+    # 会导致"点 ＋/⚙️ 收不起/重复展开")。_add_stock_dialog/_open_settings_panel/_close_settings 读写;
+    # param 存当前打开参数面板的股票 code(无则 None)。
+    panel_state = {"settings": False, "add": False, "param": None}
     QUOTE_PACK = dict(fill="x", padx=2, pady=0)
     SIG_PACK = dict(fill="x", padx=4, pady=(0, 0))
     # 窗口宽度锁定: 首轮 refresh 捕获折叠态(收起面板)宽度并 minsize=maxsize 锁死,
@@ -1791,13 +1827,24 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         down_btn._orig_padx = down_btn.cget("padx")   # (0, 0)
         down_btn.bind("<Button-1>", lambda e, c=code: _move_stock(c, "down"))
         move_btns[code] = (up_btn, down_btn)
+        # 个股参数按钮(⚙, 功能④): 位于工具区最左(排序箭头左侧), 左键打开该股参数面板。
+        # 同时是右键菜单不可靠(macOS)时配置参数的可达入口。
+        param_btn = tk.Label(f, text="⚙", bg=style["bg"], fg=style["fg_dim"],
+                             font=style["FONT_SM"], cursor="hand2")
+        param_btn.bind("<Button-1>", lambda e, c=code: _open_param_panel(c))
+        param_btn.pack(side="right", padx=(0, 1))
+        # 记录原始文本/内边距, 供「宽度折叠」显隐方案还原(本按钮不受 hide_sort/hide_del 控制,
+        # 但为一致性预留 _orig_* 属性)
+        param_btn._orig_text = param_btn.cget("text")   # "⚙"
+        param_btn._orig_padx = param_btn.cget("padx")   # (0, 1)
+        param_btns[code] = param_btn
         rows[code] = (sig_l, name_l, price_l, chg_l, dl_l)
         quote_frames[code] = f
         row_vis[code] = True
-        # 右键菜单: 删除该自选(功能①)——保留, 非 macOS 用户仍可用
-        f.bind("<Button-3>", lambda e, c=code: _show_remove_menu(e, c))
+        # 右键菜单: 参数设置 + 删除(功能①④)——保留, 非 macOS 用户仍可用; mac 上以 ⚙/🗑 兜底
+        f.bind("<Button-3>", lambda e, c=code: _show_row_menu(e, c))
         # 左键点击行情行(非工具按钮区域)复制股票代码(B2)
-        f.bind("<Button-1>", lambda e, c=code, t=(del_btn, up_btn, down_btn): _on_row_click(e, c, t))
+        f.bind("<Button-1>", lambda e, c=code, t=(del_btn, up_btn, down_btn, param_btn): _on_row_click(e, c, t))
 
     def _refresh_move_buttons():
         """刷新上移/下移箭头灰显: 首行 up_btn / 末行 down_btn 置为禁用色(与背景同色)。
@@ -1941,9 +1988,14 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         # 切换类操作已移除, 刷新循环仅在可见性真实变化时调用 _apply_visibility, 开销可接受。
         root.update_idletasks()
 
-    def _show_remove_menu(event, code):
-        """右键弹出删除菜单(功能①)。"""
+    def _show_row_menu(event, code):
+        """右键弹出个股操作菜单(功能①④): 参数设置 + 删除。
+
+        macOS 上 tk.Menu.tk_popup 实测不可靠(可能不弹出), 故 ⚙(参数)/🗑(删除) 左键按钮为兜底入口;
+        本菜单保留给右键可用的平台/场景。
+        """
         menu = tk.Menu(root, tearoff=0)
+        menu.add_command(label="参数设置…", command=lambda: _open_param_panel(code))
         menu.add_command(label=f"删除 {code}", command=lambda: _confirm_remove(code))
         try:
             menu.tk_popup(event.x_root, event.y_root)
@@ -2016,6 +2068,10 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             add_inline._close()          # 再次点击 ＋ -> 收起并重置
             panel_state["add"] = False
         else:
+            # 互斥: 参数面板打开时先收起
+            if panel_state["param"]:
+                param_inline.pack_forget()
+                panel_state["param"] = None
             # 钉宽度 = 当前主题窗口宽(收起态), 避免面板内部控件把 shrink-to-fit 窗口撑大
             add_inline.config(width=root.winfo_width())
             add_inline.pack(after=(settings_inline if panel_state["settings"] else status),
@@ -2180,6 +2236,127 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         # 暴露「收起 + 重置」句柄给外层 toggle 与内部回调使用
         add_inline._close = _close
 
+    # ---- 个股参数面板(功能④): support / resistance / chg_alert / swing_alert 配置(内联) ----
+    # 入口: 行情行 ⚙ 按钮(左键, mac 可靠) + 右键菜单「参数设置…」。后端已支持个股级四参数
+    # (normalize 透传 + worker 个股优先 + _serialize_stocks 已含), 本面板补齐 UI 落盘。
+    param_inline = tk.Frame(center, bg=style["bg"])
+    param_inline.pack_forget()
+    param_built = {"done": False}
+    param_vars: Dict[str, "tk.StringVar"] = {}
+    param_title_holder: Dict[str, object] = {"label": None}
+
+    def _open_param_panel(code: str):
+        """打开(或切换至)个股参数面板; 与设置/添加面板互斥。"""
+        if not any(st["code"] == code for st in stocks):
+            return
+        # 互斥收起其他面板
+        if panel_state["settings"]:
+            settings_inline.pack_forget()
+            panel_state["settings"] = False
+        if panel_state["add"]:
+            add_inline._close()
+            panel_state["add"] = False
+        if not param_built["done"]:
+            _build_param_panel()
+            param_built["done"] = True
+        cur = next(s for s in stocks if s["code"] == code)
+        # 填充当前值: support/resistance 逗号连接; chg/swing 留空 = 未配置(回退全局)
+        param_vars["support"].set(", ".join(str(x) for x in (cur.get("support") or [])))
+        param_vars["resistance"].set(", ".join(str(x) for x in (cur.get("resistance") or [])))
+        param_vars["chg_alert"].set("" if cur.get("chg_alert") is None else str(cur["chg_alert"]))
+        param_vars["swing_alert"].set("" if cur.get("swing_alert") is None else str(cur["swing_alert"]))
+        if param_title_holder["label"] is not None:
+            param_title_holder["label"].config(text=f"参数设置 — {cur.get('name', code)} ({code})")
+        param_inline.config(width=root.winfo_width())
+        param_inline.pack(after=status, fill="x")
+        panel_state["param"] = code
+        root.update_idletasks()
+
+    def _build_param_panel():
+        """一次性在 param_inline 中构建: 标题 + 4 输入行 + 保存/取消 + 提示。"""
+        param_inline.configure(bg=style["bg"])
+        param_title_holder["label"] = tk.Label(
+            param_inline, text="参数设置", bg=style["bg"], fg=style["fg"],
+            font=style["FONT_SM"], anchor="w")
+        param_title_holder["label"].pack(fill="x", padx=8, pady=(4, 0))
+        tk.Label(param_inline,
+                 text="支撑/压力可多个(逗号分隔); 变动/波动提示单位 %; 留空 = 不配置(回退全局)",
+                 bg=style["bg"], fg=style["fg_dim"], font=style["FONT_SM"], anchor="w"
+                 ).pack(fill="x", padx=8, pady=(0, 2))
+
+        def make_param_row(label_text: str, key: str):
+            frm = tk.Frame(param_inline, bg=style["bg"])
+            frm.pack(fill="x", padx=8, pady=2)
+            tk.Label(frm, text=label_text, bg=style["bg"], fg=style["fg"],
+                     font=style["FONT_SM"], width=13, anchor="w").pack(side="left")
+            var = tk.StringVar()
+            ent = tk.Entry(frm, textvariable=var, bg=style["bg"], fg=style["fg"],
+                           font=style["FONT_SM"])
+            ent.pack(side="left", fill="x", expand=True)
+            param_vars[key] = var
+
+        make_param_row("支撑位 support", "support")
+        make_param_row("压力位 resistance", "resistance")
+        make_param_row("变动提示 % chg_alert", "chg_alert")
+        make_param_row("波动提示 % swing_alert", "swing_alert")
+
+        btn_row = tk.Frame(param_inline, bg=style["bg"])
+        btn_row.pack(fill="x", padx=8, pady=(4, 8))
+        tk.Button(btn_row, text="保存", command=_save_param,
+                  bg=style["bg"], fg=style["fg"], font=style["FONT_SM"]
+                  ).pack(side="left", padx=(0, 4))
+        tk.Button(btn_row, text="取消", command=_close_param,
+                  bg=style["bg"], fg=style["fg"], font=style["FONT_SM"]
+                  ).pack(side="left")
+
+    def _save_param():
+        """保存当前个股参数: 更新内存(worker 即刻生效) + 落盘 stocks.toml + 收起面板。"""
+        code = panel_state["param"]
+        if not code:
+            return
+        cur = next((s for s in stocks if s["code"] == code), None)
+        if cur is None:
+            return
+        support = parse_levels_txt(param_vars["support"].get())
+        resistance = parse_levels_txt(param_vars["resistance"].get())
+        ca = parse_pct_txt(param_vars["chg_alert"].get())
+        sa = parse_pct_txt(param_vars["swing_alert"].get())
+        # 更新内存: worker 即刻生效; 清空 chg/swing = 回退全局值(与 load_stocks setdefault 语义一致)
+        if support is None:
+            cur.pop("support", None)
+        else:
+            cur["support"] = support
+        if resistance is None:
+            cur.pop("resistance", None)
+        else:
+            cur["resistance"] = resistance
+        if ca is None:
+            cur["chg_alert"] = _to_float(settings.get("chg_alert")) or 0.0
+        else:
+            cur["chg_alert"] = ca
+        if sa is None:
+            cur["swing_alert"] = _to_float(settings.get("swing_alert")) or 0.0
+        else:
+            cur["swing_alert"] = sa
+        # 落盘: update_data 中 None = 移除字段(重启后回退全局/无配置)
+        update_data = {"support": support, "resistance": resistance,
+                       "chg_alert": ca, "swing_alert": sa}
+        if stocks_path:
+            try:
+                rewrite_stocks_toml(stocks_path, update_code=code, update_data=update_data)
+            except Exception as e:
+                status.config(text=f"写入 stocks.toml 失败: {e}")
+                return
+        status.config(text=f"已保存 {code} 参数")
+        _close_param()
+
+    def _close_param():
+        """收起参数面板并刷新几何。"""
+        param_inline.pack_forget()
+        panel_state["param"] = None
+        root.update_idletasks()
+
+
     def _add_stock(parsed):
         """把解析后的股票加入内存列表 + GUI + 回写 stocks.toml(功能①)。"""
         code = parsed["code"]
@@ -2234,6 +2411,7 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             # 遍历到它们调 .config() 会抛 TclError: invalid command name
             "del_btns": del_btns,
             "move_btns": move_btns,
+            "param_btns": param_btns,
         })
         if qf is not None:
             qf.destroy()
@@ -2351,6 +2529,10 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             settings_inline.pack_forget()          # 再次点击 ⚙️ -> 收起
             panel_state["settings"] = False
         else:
+            # 互斥: 参数面板打开时先收起
+            if panel_state["param"]:
+                param_inline.pack_forget()
+                panel_state["param"] = None
             # 钉宽度 = 当前主题窗口宽(收起态), 避免面板内部控件比行情行宽时把 shrink-to-fit 窗口撑大
             settings_inline.config(width=root.winfo_width())
             settings_inline.pack(after=status, fill="x")
