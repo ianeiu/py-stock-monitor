@@ -60,6 +60,11 @@ except Exception:
     messagebox = None
 
 try:
+    from tkinter import colorchooser  # 设置面板: 涨/跌色配置弹系统颜色选择器(macOS 即 NSColorPanel)
+except Exception:
+    colorchooser = None
+
+try:
     from zoneinfo import ZoneInfo
     _ZI = True
 except Exception:
@@ -2388,6 +2393,61 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         make_slider(
             "灰度", 0.0, 1.0, cur_gray, 0.05,
             lambda val: _apply_grayness(val))
+
+        # --- 涨/跌色配置: 色块预览 + 当前 hex + 「选择」按钮, 弹系统颜色面板 ---
+        # macOS 上 tkinter.colorchooser.askcolor 调起的是 NSColorPanel(效果如图), 可视化选择 HSL。
+        # 写入 settings / config.toml 的都是「原色」(未应用灰度), build_style 内部 desaturate 后再渲。
+        if colorchooser is not None:
+            colors_row = tk.Frame(settings_inline, bg=style["bg"])
+            colors_row.pack(fill="x", padx=8, pady=(0, 4))
+            colors_row.columnconfigure(0, weight=1)
+            colors_row.columnconfigure(1, weight=1)
+
+            def make_color_picker(parent, label_text: str, key: str, default_hex: str, col: int):
+                """一行颜色选择器: 色块 + 「标签 #hex」+ 「选择」按钮; 选完实时持久化 + 重渲。"""
+                # 当前原色(未灰度): settings 里有就 settings, 没有就默认
+                cur = _hex_color(settings.get(key), default_hex)
+                cell = tk.Frame(parent, bg=style["bg"])
+                cell.grid(row=0, column=col, padx=4, pady=4, sticky="ew")
+                cell.columnconfigure(1, weight=1)
+
+                swatch = tk.Label(cell, bg=cur, width=3, relief="solid", bd=1, cursor="hand2")
+                swatch.grid(row=0, column=0, padx=(0, 6))
+
+                txt = tk.Label(cell, text=f"{label_text} {cur}", bg=style["bg"],
+                               fg=style["fg"], font=style["FONT_SM"], anchor="w")
+                txt.grid(row=0, column=1, sticky="ew", padx=(0, 4))
+
+                def _pick():
+                    """弹系统颜色选择器, 选完落 settings + config.toml + 重渲浮窗色。"""
+                    # initialcolor 需要 #rrggbb 形式
+                    initial = _hex_color(settings.get(key), default_hex)
+                    try:
+                        rgb, hexv = colorchooser.askcolor(
+                            color=initial, parent=root, title=f"选择{label_text}")
+                    except Exception:
+                        return  # 无 GUI 兜底
+                    if not hexv:                # 用户取消
+                        return
+                    hex_norm = hexv.lower()
+                    if not re.fullmatch(r"#([0-9a-fA-F]{6})", hex_norm):
+                        return                  # 防御: askcolor 几乎总返回合法值
+                    settings[key] = hex_norm    # 原色入 settings(灰度由 build_style 应用)
+                    _save_config_key(key, hex_norm)
+                    swatch.config(bg=hex_norm)
+                    txt.config(text=f"{label_text} {hex_norm}")
+                    _reapply_style()            # 全量重刷(色已即时生效)
+                    root.update_idletasks()
+
+                btn = tk.Button(
+                    cell, text="选择", bg=style["bg"], fg=style["fg"], font=style["FONT_SM"],
+                    cursor="hand2", relief="flat", padx=8, pady=1,
+                    command=_pick)
+                btn.grid(row=0, column=2)
+
+            # 默认色: 浅色主题涨 #d33 / 跌 #38d (与 build_style 内置 pal 一致; 缺省回退保证色块不为空)
+            make_color_picker(colors_row, "涨色", "float_up_color",   "#d33d3d", col=0)
+            make_color_picker(colors_row, "跌色", "float_down_color", "#3dc23d", col=1)
 
         # --- 4 个开关: 2 行 2 列网格, 紧凑布局 ---
         toggles_grid = tk.Frame(settings_inline, bg=style["bg"])

@@ -1463,6 +1463,36 @@ class TestStyle(unittest.TestCase):
         st = sf.build_style({"float_up_color": "notacolor"})
         self.assertEqual(st["up"], sf.LIGHT_PALETTE["up"])
 
+    def test_build_style_custom_up_down_color(self):
+        """设置面板选色后: build_style 应接受 float_up_color / float_down_color 并经灰度处理。"""
+        # 自定义涨红/跌绿; grayness=0 → 与原色一致
+        st = sf.build_style({"float_up_color": "#ff0000", "float_down_color": "#00ff00",
+                             "grayness": 0.0})
+        self.assertEqual(st["up"], "#ff0000")
+        self.assertEqual(st["down"], "#00ff00")
+        # grayness>0 时应 desaturate(原色, amount) → 颜色改变但仍是合法 hex
+        st2 = sf.build_style({"float_up_color": "#ff0000", "grayness": 0.5})
+        self.assertNotEqual(st2["up"], "#ff0000")
+        self.assertRegex(st2["up"], r"^#[0-9a-f]{6}$")
+        # 缺省(未配)回退到 pal.up / pal.down
+        st3 = sf.build_style({})
+        self.assertEqual(st3["up"], sf.LIGHT_PALETTE["up"])
+        self.assertEqual(st3["down"], sf.LIGHT_PALETTE["down"])
+
+    def test_save_config_key_string_persists_hex(self):
+        """设置面板选色写 config.toml: hex 字符串应作为带引号 TOML 字符串落盘, 重启可回读。"""
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:
+            f.write("[settings]\nfloat_alpha = 0.94\n")
+            cfg = f.name
+        try:
+            sf._save_config_key("float_up_color", "#e5c9c7", path=cfg)
+            with open(cfg, "rb") as f:
+                raw = sf.tomllib.load(f)
+            self.assertEqual(raw["settings"]["float_up_color"], "#e5c9c7")
+        finally:
+            os.unlink(cfg)
+
     def test_detect_system_theme(self):
         # darwin + "Dark" -> dark
         with mock.patch.object(sf.sys, "platform", "darwin"):
