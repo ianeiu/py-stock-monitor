@@ -2401,14 +2401,16 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             colors_row = tk.Frame(settings_inline, bg=style["bg"])
             colors_row.pack(fill="x", padx=8, pady=(0, 4))
             colors_row.columnconfigure(0, weight=1)
-            colors_row.columnconfigure(1, weight=1)
 
-            def make_color_picker(parent, label_text: str, key: str, default_hex: str, col: int):
-                """一行颜色选择器: 色块 + 「标签 #hex」+ 「选择」按钮; 选完实时持久化 + 重渲。"""
+            def make_color_picker(parent, label_text: str, key: str, default_hex: str, row: int):
+                """一行颜色选择器: 色块 + 「标签 #hex」+ 「选择」按钮; 选完实时持久化 + 重渲。
+
+                每行一个颜色(涨/跌各占一行), 占满整行宽度, 便于色块/hex/按钮横向舒展。
+                """
                 # 当前原色(未灰度): settings 里有就 settings, 没有就默认
                 cur = _hex_color(settings.get(key), default_hex)
                 cell = tk.Frame(parent, bg=style["bg"])
-                cell.grid(row=0, column=col, padx=4, pady=4, sticky="ew")
+                cell.grid(row=row, column=0, padx=4, pady=4, sticky="ew")
                 cell.columnconfigure(1, weight=1)
 
                 swatch = tk.Label(cell, bg=cur, width=3, relief="solid", bd=1, cursor="hand2")
@@ -2446,8 +2448,8 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
                 btn.grid(row=0, column=2)
 
             # 默认色: 浅色主题涨 #d33 / 跌 #38d (与 build_style 内置 pal 一致; 缺省回退保证色块不为空)
-            make_color_picker(colors_row, "涨色", "float_up_color",   "#d33d3d", col=0)
-            make_color_picker(colors_row, "跌色", "float_down_color", "#3dc23d", col=1)
+            make_color_picker(colors_row, "涨色", "float_up_color",   "#d33d3d", row=0)
+            make_color_picker(colors_row, "跌色", "float_down_color", "#3dc23d", row=1)
 
         # --- 4 个开关: 2 行 2 列网格, 紧凑布局 ---
         toggles_grid = tk.Frame(settings_inline, bg=style["bg"])
