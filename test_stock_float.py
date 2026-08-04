@@ -754,6 +754,28 @@ class TestHideSortDelToggles(unittest.TestCase):
         self.assertIs(False, s.get("hide_sort", False))
         self.assertIs(False, s.get("hide_del", False))
 
+    def test_save_config_key_hide_param_persists_and_roundtrips(self):
+        """hide_param 持久化闭环: 面板开关写盘 -> 裸布尔 -> load_settings 回读为 bool(重启生效依据)。"""
+        try:
+            import tomllib
+        except ImportError:
+            tomllib = None
+        if tomllib is None:
+            self.skipTest("tomllib 不可用(需 py3.11+)")
+        path = "/tmp/qa_hide_cfg.toml"
+        try:
+            self._write_tmp_cfg(path)
+            sf._save_config_key("hide_param", True, path=path)
+            raw = Path(path).read_text("utf-8")
+            self.assertRegex(raw, r"(?m)^hide_param = true$")
+            with mock.patch.object(sf, "SETTINGS_CANDIDATES", [path]), \
+                 mock.patch.object(sf, "STOCKS_CANDIDATES", [path]):
+                s = sf.load_settings()
+            self.assertIs(True, s.get("hide_param"))
+        finally:
+            if os.path.exists(path):
+                os.remove(path)
+
 
 class FakeWidget:
     """无 Tk 桩: 模拟 tk.Label 的文本/内边距显隐(宽度折叠)与 pack/pack_forget 副作用, 带调用计数。
@@ -2728,6 +2750,30 @@ class TestGraynessReentrancyGuard(unittest.TestCase):
 # 20. macOS 窗口放大禁用锁: run_hud 必须包含 "-zoom" 平台属性处理(绿色放大按钮)
 #     防止未来删掉导致放大破坏宽度锁定(无头 AST 校验, 不实例化 Tk)。
 # ----------------------------------------------------------------------------
+class TestReloadSettingsKeysContract(unittest.TestCase):
+    """热重载键列表契约锁: _reload_settings 的键列表必须包含 hide_param(与 hide_sort/hide_del
+    同级), 否则外部编辑 config.toml 后 hide_param 不会被热重载同步(2026-08-04 曾遗漏)。"""
+
+    @classmethod
+    def setUpClass(cls):
+        src = Path(sf.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        hud = next(n for n in tree.body
+                   if isinstance(n, ast.FunctionDef) and n.name == "run_hud")
+        cls._reload = next(
+            f for f in hud.body
+            if isinstance(f, ast.FunctionDef) and f.name == "_reload_settings")
+
+    def test_reload_settings_includes_hide_param(self):
+        literals = {
+            n.value for n in ast.walk(self._reload)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)
+        }
+        for key in ("hide_param", "hide_sort", "hide_del"):
+            self.assertIn(key, literals,
+                          f"回归: _reload_settings 键列表缺 {key}(外部编辑热重载不生效)")
+
+
 class TestMacWindowZoomDisabled(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

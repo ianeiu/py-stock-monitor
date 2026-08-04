@@ -2874,7 +2874,7 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         nonlocal alpha, style
         new = load_settings()
         for k in ("float_alpha", "grayness", "topmost", "show_signal",
-                  "hide_sort", "hide_del", "notify", "float_theme",
+                  "hide_sort", "hide_del", "hide_param", "notify", "float_theme",
                   "float_font", "float_font_size", "refresh_sec"):
             if k in new:
                 settings[k] = new[k]
