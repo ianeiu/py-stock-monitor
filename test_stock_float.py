@@ -2826,6 +2826,26 @@ class TestMacWindowZoomDisabled(unittest.TestCase):
             "回归: refresh 闭包内未调用 root.geometry(宽度放大后无法强制恢复)",
         )
 
+    def test_run_hud_binds_configure_for_real_time_width_guard(self):
+        """锁定: run_hud 内必须 bind '<Configure>' 事件(实时拦截 macOS 缩放按钮/双击)。
+        refresh 守卫是周期级兜底(1~10s 一查), Configure 守卫是事件级兜底(立即拦截),
+        两者缺一不可——只有 Configure 守卫能阻止用户点完绿色按钮后到下一轮 refresh 之间的视觉放大。"""
+        bind_calls = [
+            n for n in ast.walk(self._tree)
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "bind"
+        ]
+        configure_binds = [
+            n for n in bind_calls
+            if any(isinstance(a, ast.Constant) and a.value == "<Configure>"
+                   for a in n.args)
+        ]
+        self.assertTrue(
+            configure_binds,
+            "回归: run_hud 未 bind <Configure> 事件(实时宽度守卫缺失, 放大按钮可点放大直到下一轮 refresh)",
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

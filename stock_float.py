@@ -1793,6 +1793,18 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     # 使设置/添加面板展开时窗口不再被内部控件撑大(始终等于主题窗口宽)。
     # target: 锁定宽度值, 供后续每轮 refresh 侦测并修正被意外拉大的宽度(macOS 缩放/全屏等)。
     width_locked = {"v": False, "target": None}
+
+    # 防缩放守卫(实时): 监听 root 的 <Configure> 事件, 任何几何变化瞬间强制恢复锁定宽度。
+    # 比 refresh 循环守卫更实时——macOS 绿色放大按钮 / 双击标题栏 / 最大化等任何 resize 或
+    # zoom 行为都在事件层被拦截, 立刻调 geometry() 拉回; 不依赖 Tk 不存在的平台专有属性。
+    # 之所以在 root 上 bind 而不是全树: 子控件(行情行/面板)的 <Configure> 也会冒泡上来,
+    # 用 e.widget is root 过滤只处理根窗口自身尺寸变化, 避免误伤。
+    def _enforce_width(e):
+        if width_locked["v"] and width_locked["target"]:
+            if e.widget is root and e.width != width_locked["target"]:
+                root.geometry(f"{width_locked['target']}x{e.height}")
+                root.update_idletasks()
+    root.bind("<Configure>", _enforce_width)
     # 配置热重载: 记录已处理过的文件 mtime, 仅当 mtime 超过"自身写时间戳 + 缓冲"才视为外部改动
     cfg_poll = {"stocks_mt": 0.0, "config_mt": 0.0}
 
