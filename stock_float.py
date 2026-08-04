@@ -986,16 +986,24 @@ def load_settings() -> dict:
 def _save_config_key(key: str, value, path: str = None) -> None:
     """向 config.toml 写入单个 [settings] 键值对（保留式）。用于设置面板实时持久化。
 
-    - path: 目标文件; 缺省遍历 SETTINGS_CANDIDATES 取第一个已存在者, 都不存在则静默跳过。
+    - path: 目标文件; 缺省按「SCRIPT_DIR(与 _load_first 读取端一致, 打包后 boot.py 重定向为
+      发布目录) → 当前工作目录」顺序遍历 SETTINGS_CANDIDATES 取第一个已存在者, 都不存在则静默跳过。
+      此前仅用 CWD 相对路径 os.path.isfile(c), 打包后双击 .app 时 CWD ≠ 发布目录,
+      导致面板所有写盘静默失败(2026-08-04 真机: hide_param 不持久化)。
     - bool 值落为裸 TOML 布尔(如 True/False, 无引号), 重启可正确回读; float 值用 repr 落为合法 TOML 数值(如 0.94, 无引号); 其它值用 repr(str(value)) 落为字符串。
     - 保留其它段与注释; 异常静默吞掉, 不阻塞 UI。
     """
     try:
         target = path
         if not target:
-            for c in SETTINGS_CANDIDATES:
-                if os.path.isfile(c):
-                    target = c
+            # 与读取端 _load_first 对齐: 优先 SCRIPT_DIR(打包后=发布目录), 再回退 CWD(旧行为兼容)
+            for base in (SCRIPT_DIR, os.getcwd()):
+                for c in SETTINGS_CANDIDATES:
+                    cand = os.path.join(base, c)
+                    if os.path.isfile(cand):
+                        target = cand
+                        break
+                if target:
                     break
         if not target:
             return

@@ -776,6 +776,21 @@ class TestHideSortDelToggles(unittest.TestCase):
             if os.path.exists(path):
                 os.remove(path)
 
+    def test_save_config_key_default_prefers_script_dir(self):
+        """缺省 path 解析: 优先 SCRIPT_DIR(打包后 boot.py 重定向为发布目录), 而非 CWD——
+        修复打包后双击 .app 时面板写盘静默失败(2026-08-04 真机: hide_param 不持久化)。"""
+        with tempfile.TemporaryDirectory() as script_dir, \
+             tempfile.TemporaryDirectory() as cwd_dir:
+            cfg = Path(script_dir) / "config.toml"
+            cfg.write_text("[settings]\nfloat_alpha = 0.94\n", encoding="utf-8")
+            with mock.patch.object(sf, "SCRIPT_DIR", script_dir), \
+                 mock.patch.object(sf, "SETTINGS_CANDIDATES", ["config.toml"]), \
+                 mock.patch("os.getcwd", return_value=cwd_dir):
+                sf._save_config_key("hide_param", True)   # 不传 path
+            self.assertIn("hide_param = true", cfg.read_text(encoding="utf-8"))
+            # CWD 里没有 config.toml 也不受影响; CWD 有也不应写入(SCRIPT_DIR 优先)
+            self.assertFalse((Path(cwd_dir) / "config.toml").exists())
+
 
 class FakeWidget:
     """无 Tk 桩: 模拟 tk.Label 的文本/内边距显隐(宽度折叠)与 pack/pack_forget 副作用, 带调用计数。
