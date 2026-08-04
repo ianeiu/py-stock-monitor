@@ -1791,40 +1791,21 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     SIG_PACK = dict(fill="x", padx=4, pady=(0, 0))
     # 窗口宽度锁定: 首轮 refresh 捕获折叠态(收起面板)宽度并 minsize=maxsize 锁死,
     # 使设置/添加面板展开时窗口不再被内部控件撑大(始终等于主题窗口宽)。
-    # target: 锁定宽度值; baseline_h: 首轮折叠态高度, 作为高度异常阈值基准。
-    # max_h: 合理高度上限 = baseline_h × 5(给面板展开/加股票留足余量); 超过即视为被 zoom 拉伸。
-    width_locked = {"v": False, "target": None, "baseline_h": 0, "max_h": 1000}
+    # target: 锁定宽度值。不锁高度——高度由内容驱动(面板展开/加股票/信号行变化),
+    #   通过 refresh 周期守卫兜底(1~10s)检测高度异常。如果在这里锁高度, 面板一展开就被截断。
+    width_locked = {"v": False, "target": None}
 
-    # 防缩放守卫(实时): 监听 root 的 <Configure> 事件, 任何几何变化瞬间强制恢复锁定宽度/合理高度。
-    # 比 refresh 循环守卫更实时——macOS 绿色放大按钮 / 双击标题栏 / 最大化等任何 resize 或
-    # zoom 行为都在事件层被拦截, 立刻调 geometry() 拉回; 不依赖 Tk 不存在的平台专有属性。
-    # 之所以在 root 上 bind 而不是全树: 子控件(行情行/面板)的 <Configure> 也会冒泡上来,
-    # 用 e.widget is root 过滤只处理根窗口自身尺寸变化, 避免误伤。
-    #
-    # 修复 V3.1: 之前的 geometry(f"{w}x{e.height}") 把 zoom 拉伸的异常高度固化了。
-    # 现在改用 winfo_reqheight() 推断"内容真实所需高度", 且仅在高度异常(超过 max_h 阈值)
-    # 或宽度不一致时才强制收缩, 避免误伤面板展开/加股票时的自然高度增长。
+    # 防缩放守卫(实时): 监听 root 的 <Configure> 事件, **仅**在宽度偏离锁值时强制恢复。
+    # 高度完全不干预(内容自然撑高/收缩, 由 refresh 周期守卫兜底处理 zoom 残留的异常高度)。
+    # 不调用 wm_state("normal")——那会把置顶(topmost)也干掉, 导致窗口沉底。
     def _enforce_window(e):
         if not width_locked["v"] or not width_locked["target"]:
             return
         if e.widget is not root:
             return
-        # 强制 normal 状态(撤销 macOS 绿色按钮 zoom 残留的 maximize 态)
-        try:
-            root.wm_state("normal")
-        except tk.TclError:
-            pass
-        cur_w = e.width
-        cur_h = e.height
-        target_w = width_locked["target"]
-        max_h = width_locked["max_h"]
-        # 宽度永远锁定; 高度仅在异常大(超过阈值, 判定为被 zoom 拉伸)时才收缩
-        if cur_w != target_w or cur_h > max_h:
-            # 用内容真实所需高度作为收缩目标(面板/股票行的合法增长空间)
-            req_h = root.winfo_reqheight()
-            # 若内容所需高度大于阈值(罕见, 比如新加股票后基线滞后), 仍尊重 max_h 下限
-            final_h = min(max_h, max(req_h, width_locked["baseline_h"]))
-            root.geometry(f"{target_w}x{final_h}")
+        if e.width != width_locked["target"]:
+            # 宽度锁死; 高度保留当前值(不干涉内容高度, 避免截断面板)
+            root.geometry(f"{width_locked['target']}x{e.height}")
             root.update_idletasks()
     root.bind("<Configure>", _enforce_window)
     # 配置热重载: 记录已处理过的文件 mtime, 仅当 mtime 超过"自身写时间戳 + 缓冲"才视为外部改动
@@ -3101,32 +3082,21 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             snap = dict(data)
             sig_changes = dict(last_sig_change)
         offline = not snap
-        # 窗口宽度锁定 + 防缩放守卫(周期级, 配合 Configure 事件级共同兜底):
-        # 首轮捕获折叠态宽度/高度并锁死; 之后每轮侦测——
-        # 宽度被意外拉大 或 高度异常(zomm 拉伸) 时强制恢复原始宽度/合理高度。
-        # 不依赖 Tk 不存在的 "-zoom" 等平台专有属性, 跨 macOS/Tk 版本一致生效。
+        # 窗口宽度锁定(首轮 capture + 每轮兜底): Configure 实时守卫锁宽度,
+        # 本处周期级兜底(1~10s)作为冗余。高度完全放行——由内容自然撑高/收缩。
         w = root.winfo_width()
-        h = root.winfo_height()
         if w and w > 0:
             if not width_locked["v"]:
-                # 首轮: 锁定宽度(min/max 均=w), 高度完全放行(max=极大);
-                # 记基线高度, max_h = baseline_h × 5 + 50(给面板/股票增长留余量)。
+                # 首轮: 锁定宽度(min/max 均=w), 高度完全放行(max=极大)
                 root.minsize(w, 1)
                 root.maxsize(w, 100000)
                 width_locked["v"] = True
                 width_locked["target"] = w
-                width_locked["baseline_h"] = max(1, h)
-                width_locked["max_h"] = width_locked["baseline_h"] * 5 + 50
-            else:
-                target_w = width_locked["target"]
-                max_h = width_locked["max_h"]
-                # 兜底: 宽度被拉大 或 高度异常大(超过 max_h 阈值, 判定为 zoom 残留) → 强制恢复
-                if w != target_w or h > max_h:
-                    # 用内容真实所需高度(winfo_reqheight)而非当前 h, 避免固化 zoom 异常值
-                    req_h = root.winfo_reqheight()
-                    final_h = min(max_h, max(req_h, width_locked["baseline_h"]))
-                    root.geometry(f"{target_w}x{final_h}")
-                    root.update_idletasks()
+            elif w != width_locked["target"]:
+                # 兜底: 宽度被拉大(极少情况, Configure 守卫已拦下绝大多数) → 强制恢复
+                h = root.winfo_height()
+                root.geometry(f"{width_locked['target']}x{h}")
+                root.update_idletasks()
         for st in stocks:
             code = st["code"]
             # 信号行(下半)默认只展示有信号变动的股票; 信号提示关闭时一律隐藏(运行时态短路)
