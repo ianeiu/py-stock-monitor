@@ -1669,14 +1669,9 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     root.attributes("-alpha", alpha)       # 透明度, 由 float_alpha 配置控制
     root.configure(bg=style["bg"])
     root.resizable(False, False)
-    # macOS: 禁用窗口右上角绿色「放大/缩放」按钮(macOS Tk 8.6+ 支持 -zoom 属性)。
-    # 即使 overrideredirect 窗口在个别 Tk 版本 / 打包场景下出现标题栏红绿灯,
-    # 也强制不允许放大(否则会破坏首轮 refresh 的宽度锁定)。try 包裹防御平台差异。
-    if sys.platform == "darwin":
-        try:
-            root.attributes("-zoom", False)
-        except tk.TclError:
-            pass
+    # macOS: 禁用绿色放大按钮(macOS Tk 无直接 API; 本文依赖 overrideredirect 去标题栏 +
+    # resizable 禁边缘缩放 + 下文的 refresh 宽度守卫 三管齐下。若窗口仍被放大(全屏手势等),
+    # refresh 守卫每轮强制恢复原始宽度——这是唯一兜底, 不依赖平台专有属性)。
 
     # ---- 顶部拖拽条 ----
     header = tk.Frame(root, bg=style["header"], height=14)
@@ -1796,7 +1791,8 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     SIG_PACK = dict(fill="x", padx=4, pady=(0, 0))
     # 窗口宽度锁定: 首轮 refresh 捕获折叠态(收起面板)宽度并 minsize=maxsize 锁死,
     # 使设置/添加面板展开时窗口不再被内部控件撑大(始终等于主题窗口宽)。
-    width_locked = {"v": False}
+    # target: 锁定宽度值, 供后续每轮 refresh 侦测并修正被意外拉大的宽度(macOS 缩放/全屏等)。
+    width_locked = {"v": False, "target": None}
     # 配置热重载: 记录已处理过的文件 mtime, 仅当 mtime 超过"自身写时间戳 + 缓冲"才视为外部改动
     cfg_poll = {"stocks_mt": 0.0, "config_mt": 0.0}
 
@@ -3071,18 +3067,22 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             snap = dict(data)
             sig_changes = dict(last_sig_change)
         offline = not snap
-        # 窗口宽度锁定(宽度整改): 首轮 refresh 时窗口已 realize, 捕获折叠态(面板收起)宽度并
-        # minsize=maxsize 锁死, 使设置/添加面板展开时窗口不再被内部控件撑大(始终等于主题窗口宽)。
-        if not width_locked["v"]:
-            w = root.winfo_width()
-            if w and w > 0:
-                # 只锁宽度(min/max 均=w), 高度完全放行:
-                # - min height=1: 允许窗口随内容收缩, 否则首轮刷新把"信号区全撑开"的虚高锁进
-                #   minsize, 信号行隐藏后窗口缩不回去, 表现为"没数据高度也撑很大";
-                # - max height=100000: 允许设置/添加面板展开时正常增高(不误伤内容撑高)。
+        # 窗口宽度锁定 + 防缩放守卫: 首轮捕获折叠态宽度并锁死; 之后每轮侦测——
+        # 若宽度被 macOS 缩放/全屏/双击等意外拉大, 强制恢复原始宽度。
+        # 这比平台专有属性(如不存在的 "-zoom")更可靠: 不依赖 Tk 版本, 跨 macOS 行为兜底。
+        w = root.winfo_width()
+        if w and w > 0:
+            if not width_locked["v"]:
+                # 首轮: 锁定宽度(min/max 均=w), 高度完全放行
                 root.minsize(w, 1)
                 root.maxsize(w, 100000)
-            width_locked["v"] = True
+                width_locked["v"] = True
+                width_locked["target"] = w
+            elif width_locked["target"] and w != width_locked["target"]:
+                # 兜底: 宽度被意外拉大(如 macOS 缩放/全屏事件绕过 resizable) → 强制恢复
+                h = root.winfo_height()
+                root.geometry(f"{width_locked['target']}x{h}")
+                root.update_idletasks()
         for st in stocks:
             code = st["code"]
             # 信号行(下半)默认只展示有信号变动的股票; 信号提示关闭时一律隐藏(运行时态短路)

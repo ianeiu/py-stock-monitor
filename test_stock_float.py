@@ -2790,39 +2790,40 @@ class TestReloadSettingsKeysContract(unittest.TestCase):
 
 
 class TestMacWindowZoomDisabled(unittest.TestCase):
+    """持续宽度守卫契约锁: 替代不存在的 -zoom 属性, refresh 每轮主动侦测并修正被放大的宽度。
+
+    - width_locked 必须含 "target" 键(记录锁定值);
+    - refresh 闭包内必须使用 width_locked["target"] 与 root.geometry 实现兜底强制恢复;
+    - 不依赖任何平台专有属性, 跨 macOS/Tk 版本一致生效。
+    """
+
     @classmethod
     def setUpClass(cls):
         cls._src = Path(sf.__file__).read_text(encoding="utf-8")
         cls._tree = ast.parse(cls._src)
+        hud = next(n for n in cls._tree.body
+                   if isinstance(n, ast.FunctionDef) and n.name == "run_hud")
+        cls._refresh = next(
+            f for f in hud.body
+            if isinstance(f, ast.FunctionDef) and f.name == "refresh")
 
-    def test_run_hud_has_zoom_disabled(self):
-        """锁定: run_hud 内必须存在字符串字面量 "-zoom"(macOS 禁用绿色放大按钮)。"""
-        hud = next(
-            n for n in self._tree.body
-            if isinstance(n, ast.FunctionDef) and n.name == "run_hud"
-        )
-        literals = {
-            n.value for n in ast.walk(hud)
-            if isinstance(n, ast.Constant) and isinstance(n.value, str)
-        }
-        self.assertIn("-zoom", literals,
-                      "回归: run_hud 缺失 macOS -zoom 禁用(绿色放大按钮会破坏宽度锁定)")
+    def test_width_locked_has_target_key(self):
+        """锁定: 源码 width_locked 字典字面量必须含 '"target"' 键(持续守卫用)。"""
+        self.assertIn('"target"', self._src,
+                      "回归: width_locked 缺 'target' 键(宽度持续守卫失效)")
 
-    def test_zoom_disabled_is_platform_guarded(self):
-        """锁定: -zoom 设置必须包在 darwin 平台分支内(Windows/Linux 无需此属性)。"""
-        src = self._src
-        # 粗粒度契约: 属性调用行 root.attributes("-zoom" 出现, 且其前 25 行内有
-        # sys.platform == "darwin" 守卫(容忍行序)。不匹配注释行(注释里的 "-zoom" 在守卫之前)。
-        zoom_line = next(
-            (i + 1 for i, ln in enumerate(src.splitlines())
-             if 'attributes("-zoom"' in ln or "attributes('-zoom'" in ln),
-            None,
+    def test_refresh_uses_target_for_force_restore(self):
+        """锁定: refresh 闭包内必须用 root.geometry 调用(兜底恢复被意外拉大的宽度)。
+        使用 AST 而非正则以忽略注释/docstring 干扰。"""
+        calls_geometry = any(
+            isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "geometry"
+            for n in ast.walk(self._refresh)
         )
-        self.assertIsNotNone(zoom_line, "源码中找不到 -zoom 属性设置行")
-        window = src.splitlines()[max(0, zoom_line - 25):zoom_line + 2]
         self.assertTrue(
-            any("sys.platform == \"darwin\"" in ln or "sys.platform == 'darwin'" in ln for ln in window),
-            "回归: -zoom 设置未包在 darwin 平台守卫内",
+            calls_geometry,
+            "回归: refresh 闭包内未调用 root.geometry(宽度放大后无法强制恢复)",
         )
 
 
