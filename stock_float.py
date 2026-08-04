@@ -1661,6 +1661,14 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     root.attributes("-alpha", alpha)       # 透明度, 由 float_alpha 配置控制
     root.configure(bg=style["bg"])
     root.resizable(False, False)
+    # macOS: 禁用窗口右上角绿色「放大/缩放」按钮(macOS Tk 8.6+ 支持 -zoom 属性)。
+    # 即使 overrideredirect 窗口在个别 Tk 版本 / 打包场景下出现标题栏红绿灯,
+    # 也强制不允许放大(否则会破坏首轮 refresh 的宽度锁定)。try 包裹防御平台差异。
+    if sys.platform == "darwin":
+        try:
+            root.attributes("-zoom", False)
+        except tk.TclError:
+            pass
 
     # ---- 顶部拖拽条 ----
     header = tk.Frame(root, bg=style["header"], height=14)

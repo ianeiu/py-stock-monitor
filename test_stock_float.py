@@ -2724,5 +2724,46 @@ class TestGraynessReentrancyGuard(unittest.TestCase):
             scale.fire(0.5)
 
 
+# ----------------------------------------------------------------------------
+# 20. macOS 窗口放大禁用锁: run_hud 必须包含 "-zoom" 平台属性处理(绿色放大按钮)
+#     防止未来删掉导致放大破坏宽度锁定(无头 AST 校验, 不实例化 Tk)。
+# ----------------------------------------------------------------------------
+class TestMacWindowZoomDisabled(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls._src = Path(sf.__file__).read_text(encoding="utf-8")
+        cls._tree = ast.parse(cls._src)
+
+    def test_run_hud_has_zoom_disabled(self):
+        """锁定: run_hud 内必须存在字符串字面量 "-zoom"(macOS 禁用绿色放大按钮)。"""
+        hud = next(
+            n for n in self._tree.body
+            if isinstance(n, ast.FunctionDef) and n.name == "run_hud"
+        )
+        literals = {
+            n.value for n in ast.walk(hud)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)
+        }
+        self.assertIn("-zoom", literals,
+                      "回归: run_hud 缺失 macOS -zoom 禁用(绿色放大按钮会破坏宽度锁定)")
+
+    def test_zoom_disabled_is_platform_guarded(self):
+        """锁定: -zoom 设置必须包在 darwin 平台分支内(Windows/Linux 无需此属性)。"""
+        src = self._src
+        # 粗粒度契约: 属性调用行 root.attributes("-zoom" 出现, 且其前 25 行内有
+        # sys.platform == "darwin" 守卫(容忍行序)。不匹配注释行(注释里的 "-zoom" 在守卫之前)。
+        zoom_line = next(
+            (i + 1 for i, ln in enumerate(src.splitlines())
+             if 'attributes("-zoom"' in ln or "attributes('-zoom'" in ln),
+            None,
+        )
+        self.assertIsNotNone(zoom_line, "源码中找不到 -zoom 属性设置行")
+        window = src.splitlines()[max(0, zoom_line - 25):zoom_line + 2]
+        self.assertTrue(
+            any("sys.platform == \"darwin\"" in ln or "sys.platform == 'darwin'" in ln for ln in window),
+            "回归: -zoom 设置未包在 darwin 平台守卫内",
+        )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
