@@ -1685,36 +1685,28 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         root.destroy()
     root.protocol("WM_DELETE_WINDOW", _quit)
 
-    # 注意: 以下 header 按钮均用 side="right" 打包, 后打包的更靠左。
-    # 目标左→右顺序: ⚙️设置(最左) → 🔔显示变动 → ＋新增 → {Ns}频率 → ↺刷新
-    # 故 pack 顺序应为从右到左: set_btn → sig_btn → add_btn → freq_btn → refresh_btn
-    # (窗口置顶 📌 已并入设置面板, header 不再保留置顶按钮)
+    # header 按钮左→右顺序: ↺刷新 → 🔔显示变动 → ＋新增 → ⚙️设置
+    # 刷新频率切换已移至设置面板(⚙️ 内)。用 side="left" 打包, 先 pack 的在左。
+    # (窗口置顶 📌 已并入设置面板, 不再保留按钮)
 
     # 立即刷新: ↺ 按钮(点击触发后台立即取数)
     refresh_btn = tk.Label(header, text=" ↺ ", bg=style["header"], fg=style["fg_dim"],
                            font=style["FONT_SM"], cursor="hand2")
-    refresh_btn.pack(side="right", padx=(0, 1))
+    refresh_btn.pack(side="left", padx=(0, 1))
     refresh_btn.bind("<Button-1>", lambda e: _force_refresh())
 
     # 频率控件(1/5/10s 循环)
-    freq_btn = tk.Label(header, text=f" {refresh_sec}s ", bg=style["header"], fg=style["fg_dim"],
-                        font=style["FONT_SM"], cursor="hand2")
-    freq_btn.pack(side="right", padx=(0, 1))
-    freq_btn.bind("<Button-1>", lambda e: _cycle_freq())
+    # 刷新频率按钮(已移至设置面板, 此处保留引用占位供 _cycle_freq / _reapply_style 使用;
+    # 设置面板构建后 freq_btn["w"] 指向实际 Button 控件)
+    freq_btn = {"w": None}
 
-    # 运行时增删自选: ＋ 按钮(功能①)
-    add_btn = tk.Label(header, text=" ＋ ", bg=style["header"], fg=style["fg_dim"],
-                       font=style["FONT_SM"], cursor="hand2")
-    add_btn.pack(side="right", padx=(0, 1))
-    add_btn.bind("<Button-1>", lambda e: _add_stock_dialog())
-
-    # 信号提示显隐开关: 🔔/🔕 按钮(功能①, 运行时态, 不落盘) —— 左起第 2 位(紧挨 ⚙️ 右侧)
+    # 信号提示显隐开关: 🔔/🔕 按钮(运行时态, 不落盘) —— header 左起第 2 位(紧挨 ↺刷新)
     # 注意: 此处 ui 字典尚未定义, 故直接读 settings 默认(与 ui["show_signal"] 同源, 默认 True)
     _sig_on = bool(settings.get("show_signal", True))
     sig_btn = tk.Label(header, text=("🔔" if _sig_on else "🔕"),
                        bg=style["header"], fg=(style["fg"] if _sig_on else style["fg_dim"]),
                        font=style["FONT_SM"], cursor="hand2")
-    sig_btn.pack(side="right", padx=(0, 1))
+    sig_btn.pack(side="left", padx=(0, 1))
 
     def _toggle_signal_label():
         """点击后切换信号显隐, 并同步按钮文案与高亮。"""
@@ -1724,10 +1716,16 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
                        fg=(style["fg"] if on else style["fg_dim"]))
     sig_btn.bind("<Button-1>", lambda e: _toggle_signal_label())
 
+    # 运行时增删自选: ＋ 按钮(header 左起第 3 位)
+    add_btn = tk.Label(header, text=" ＋ ", bg=style["header"], fg=style["fg_dim"],
+                       font=style["FONT_SM"], cursor="hand2")
+    add_btn.pack(side="left", padx=(0, 1))
+    add_btn.bind("<Button-1>", lambda e: _add_stock_dialog())
+
     # 设置面板: ⚙️ 按钮(透明度+灰度+变动消息), 点开实时调节并持久化
     set_btn = tk.Label(header, text=" ⚙ ", bg=style["header"], fg=style["fg_dim"],
                        font=style["FONT_SM"], cursor="hand2")
-    set_btn.pack(side="right", padx=(0, 1))
+    set_btn.pack(side="left", padx=(0, 1))
     set_btn.bind("<Button-1>", lambda e: _open_settings_panel())
 
     drag = {"x": 0, "y": 0}
@@ -2485,14 +2483,11 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     status = tk.Label(center, text="连接中…", bg=style["bg"], fg=style["fg_dim"], font=style["FONT_SM"], anchor="w")
     status.pack(fill="x", padx=2, pady=(0, 0))
 
-    # 初始定位到右上角, 宽度预设为 280px(容纳 ▲▼🗑⚙ + 股票名/价/涨幅 + 涨/跌色 全部),
-    # 高度先给一个合理值让位置/尺寸确定; 首轮 refresh 时 winfo_width() 锁定为 280,
-    # 高度由内容自然撑高/收缩(shrink-to-fit, resizable=False)。
-    # 之前用 "+{sw-205}+20" 只设位置不设尺寸, 初始窗口仅 ~205px, 装不下加删除/参数按钮后的工具区。
+    # 初始定位到右上角: 只设位置不设尺寸, 让 Tk 根据内容自适应(避免硬编码 205/280 过窄/过宽)。
+    # 首轮 refresh 时用 winfo_reqwidth() 捕获内容实际所需宽度并锁定, 不多不少。
     root.update_idletasks()
     sw = root.winfo_screenwidth()
-    INIT_W = 280
-    root.geometry(f"{INIT_W}x400+{max(0, sw - INIT_W - 20)}+20")
+    root.geometry(f"+{max(0, sw - 205)}+20")
 
     # ---- 数据层 ----
     data: Dict[str, dict] = {}                 # code -> rec(最近一次成功)
@@ -2521,7 +2516,8 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             if not ok:
                 return  # 用户取消, 保持当前频率不变
         state["refresh_sec"] = nxt
-        freq_btn.config(text=f" {nxt}s ")
+        if freq_btn["w"] is not None:
+            freq_btn["w"].config(text=f"刷新频率：{nxt}s")
 
     # ---- 信号提示显隐开关(功能①: 运行时态, 不落盘) ----
     def _toggle_signal():
@@ -2761,6 +2757,18 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         hide_param_toggle.config(command=_toggle_hide_param)
         hide_param_toggle.grid(row=2, column=0, padx=4, pady=4, sticky="ew")
 
+        # --- 刷新频率切换(已从 header 移至设置面板, row=2 col=1 紧邻 hide_param) ---
+        def _toggle_freq():
+            _cycle_freq()
+        freq_toggle = tk.Button(
+            toggles_grid,
+            text=f"刷新频率：{refresh_sec}s",
+            bg=style["bg"], fg=style["fg"], font=style["FONT_SM"],
+            cursor="hand2", relief="flat", padx=6, pady=2, wraplength=_wl)
+        freq_toggle.config(command=_toggle_freq)
+        freq_toggle.grid(row=2, column=1, padx=4, pady=4, sticky="ew")
+        freq_btn["w"] = freq_toggle
+
         def _close_settings():
             """点击收起: 隐藏设置面板并刷新几何。
 
@@ -2862,7 +2870,7 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             sbb.configure(fg=style["fg_dim"])
             # sdot 语义色保持 sig_colors(由刷新循环按信号着色, 此处不动)
         # header 按钮(统一底色 + dim 高亮; 特殊高亮由各 toggle 自管)
-        for btn in (freq_btn, add_btn, set_btn):
+        for btn in (refresh_btn, add_btn, sig_btn, set_btn):
             btn.configure(bg=style["header"], fg=style["fg_dim"])
         root.update_idletasks()
 
@@ -3088,15 +3096,20 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         offline = not snap
         # 窗口宽度锁定(首轮 capture + 每轮兜底): Configure 实时守卫锁宽度,
         # 本处周期级兜底(1~10s)作为冗余。高度完全放行——由内容自然撑高/收缩。
+        # 首轮用 winfo_reqwidth()(内容理想宽度)而非 winfo_width(), 避免初始尺寸过窄/过宽。
         w = root.winfo_width()
-        if w and w > 0:
-            if not width_locked["v"]:
-                # 首轮: 锁定宽度(min/max 均=w), 高度完全放行(max=极大)
-                root.minsize(w, 1)
-                root.maxsize(w, 100000)
+        if not width_locked["v"]:
+            req_w = root.winfo_reqwidth()
+            # req_w 可能为 1(窗口刚初始化, 内容未完成布局); 回退到 205 下限;
+            # -25 让内容稍微紧凑(不撑满全宽), 避免 visual noise。
+            target = max(req_w - 150, 180)
+            if target > 0:
+                root.minsize(target, 1)
+                root.maxsize(target, 100000)
                 width_locked["v"] = True
-                width_locked["target"] = w
-            elif w != width_locked["target"]:
+                width_locked["target"] = target
+        elif w and w > 0:
+            if w != width_locked["target"]:
                 # 兜底: 宽度被拉大(极少情况, Configure 守卫已拦下绝大多数) → 强制恢复
                 h = root.winfo_height()
                 root.geometry(f"{width_locked['target']}x{h}")
