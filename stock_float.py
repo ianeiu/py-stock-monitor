@@ -2485,10 +2485,14 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     status = tk.Label(center, text="连接中…", bg=style["bg"], fg=style["fg_dim"], font=style["FONT_SM"], anchor="w")
     status.pack(fill="x", padx=2, pady=(0, 0))
 
-    # 初始定位到右上角
+    # 初始定位到右上角, 宽度预设为 280px(容纳 ▲▼🗑⚙ + 股票名/价/涨幅 + 涨/跌色 全部),
+    # 高度先给一个合理值让位置/尺寸确定; 首轮 refresh 时 winfo_width() 锁定为 280,
+    # 高度由内容自然撑高/收缩(shrink-to-fit, resizable=False)。
+    # 之前用 "+{sw-205}+20" 只设位置不设尺寸, 初始窗口仅 ~205px, 装不下加删除/参数按钮后的工具区。
     root.update_idletasks()
     sw = root.winfo_screenwidth()
-    root.geometry(f"+{max(0, sw - 205)}+20")
+    INIT_W = 280
+    root.geometry(f"{INIT_W}x400+{max(0, sw - INIT_W - 20)}+20")
 
     # ---- 数据层 ----
     data: Dict[str, dict] = {}                 # code -> rec(最近一次成功)
