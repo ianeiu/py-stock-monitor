@@ -811,6 +811,7 @@ class FakeWidget:
         # 原始文本/内边距(由 _make_rows 按控件语义注入, 对应源码 build 处的 _orig_* 记录)
         self._orig_text = text
         self._orig_padx = padx
+        self._cursor = ""       # 记录最近一次 config(cursor=...) 值(隐藏时="", 显示时="hand2")
         self.pack_calls = 0
         self.forget_calls = 0
         self.config_calls = 0
@@ -842,6 +843,8 @@ class FakeWidget:
             self._width = kwargs["width"]
         if "padx" in kwargs:
             self._padx = kwargs["padx"]
+        if "cursor" in kwargs:
+            self._cursor = kwargs["cursor"]     # 记录光标(隐藏时="" , 显示时="hand2")
 
 
 def _apply_row_tools_visibility_logic(move_btns, del_btns, hide_sort, hide_del,
@@ -864,25 +867,25 @@ def _apply_row_tools_visibility_logic(move_btns, del_btns, hide_sort, hide_del,
             continue
         for w in (up_btn, down_btn):
             if hide_sort:
-                w.config(text="", width=0, padx=0)
+                w.config(text="", width=0, padx=0, cursor="")
             else:
-                w.config(text=w._orig_text, width=0, padx=w._orig_padx)
+                w.config(text=w._orig_text, width=0, padx=w._orig_padx, cursor="hand2")
     for code, del_btn in list(del_btns.items()):
         if not del_btn.winfo_exists():
             del_btns.pop(code, None)
             continue
         if hide_del:
-            del_btn.config(text="", width=0, padx=0)
+            del_btn.config(text="", width=0, padx=0, cursor="")
         else:
-            del_btn.config(text=del_btn._orig_text, width=0, padx=del_btn._orig_padx)
+            del_btn.config(text=del_btn._orig_text, width=0, padx=del_btn._orig_padx, cursor="hand2")
     for code, param_btn in (param_btns or {}).items():
         if not param_btn.winfo_exists():
             param_btns.pop(code, None)
             continue
         if hide_param:
-            param_btn.config(text="", width=0, padx=0)
+            param_btn.config(text="", width=0, padx=0, cursor="")
         else:
-            param_btn.config(text=param_btn._orig_text, width=0, padx=param_btn._orig_padx)
+            param_btn.config(text=param_btn._orig_text, width=0, padx=param_btn._orig_padx, cursor="hand2")
 
 
 class TestRowToolsVisibilityGuard(unittest.TestCase):

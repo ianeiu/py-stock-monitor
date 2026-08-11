@@ -1912,25 +1912,25 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
                 continue
             for w in (up_btn, down_btn):
                 if hide_sort:
-                    w.config(text="", width=0, padx=0)
+                    w.config(text="", width=0, padx=0, cursor="")
                 else:
-                    w.config(text=w._orig_text, width=0, padx=w._orig_padx)
+                    w.config(text=w._orig_text, width=0, padx=w._orig_padx, cursor="hand2")
         for code, del_btn in list(del_btns.items()):
             if not del_btn.winfo_exists():
                 del_btns.pop(code, None)
                 continue
             if hide_del:
-                del_btn.config(text="", width=0, padx=0)
+                del_btn.config(text="", width=0, padx=0, cursor="")
             else:
-                del_btn.config(text=del_btn._orig_text, width=0, padx=del_btn._orig_padx)
+                del_btn.config(text=del_btn._orig_text, width=0, padx=del_btn._orig_padx, cursor="hand2")
         for code, param_btn in list(param_btns.items()):
             if not param_btn.winfo_exists():
                 param_btns.pop(code, None)
                 continue
             if hide_param:
-                param_btn.config(text="", width=0, padx=0)
+                param_btn.config(text="", width=0, padx=0, cursor="")
             else:
-                param_btn.config(text=param_btn._orig_text, width=0, padx=param_btn._orig_padx)
+                param_btn.config(text=param_btn._orig_text, width=0, padx=param_btn._orig_padx, cursor="hand2")
         # 运行时关闭「隐藏排序」后, 立即刷新首行 up / 末行 down 的边界灰显。
         # 不依赖 winfo_ismapped, 且 _refresh_move_buttons 不回调本函数, 故无递归风险。
         if not hide_sort:
@@ -1944,6 +1944,9 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         -> 按新顺序重排 UI 显示(pack 追加到父容器末尾) -> 协调过滤可见性
         -> 刷新箭头灰显 -> 回写 stocks.toml(reorder)。仅内存模式(stocks_path 为空)则跳过写回。
         """
+        # 守卫: hide_sort 开启时排序箭头已视觉隐藏, 拒绝误点(宽度折叠只是视觉, 绑定还在)
+        if bool(settings.get("hide_sort", False)):
+            return
         # 边界: code 不存在直接返回
         if not any(s["code"] == code for s in stocks):
             return
@@ -2281,6 +2284,9 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
 
     def _open_param_panel(code: str):
         """打开(或切换至)个股参数面板; 与设置/添加面板互斥。"""
+        # 守卫: hide_param 开启时 ⚙ 按钮已视觉隐藏, 拒绝误点
+        if bool(settings.get("hide_param", False)):
+            return
         if not any(st["code"] == code for st in stocks):
             return
         # 互斥收起其他面板
@@ -2418,6 +2424,9 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
 
         仅做一层确认包装, 不改动 _remove_stock 内部逻辑; 无头测试不直接覆盖本函数。
         """
+        # 守卫: hide_del 开启时删除按钮已视觉隐藏, 拒绝误点
+        if bool(settings.get("hide_del", False)):
+            return
         st = next((s for s in stocks if s.get("code") == code), None)
         name = st.get("name", code) if st else code
         if messagebox.askyesno("删除自选", f"确定删除 {name}（{code}）？", parent=root):
