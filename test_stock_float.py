@@ -866,6 +866,8 @@ def _apply_row_tools_visibility_logic(move_btns, del_btns, hide_sort, hide_del,
             move_btns.pop(code, None)
             continue
         for w in (up_btn, down_btn):
+            if w is None:
+                continue  # 下移箭头已移除(2026-08-12), 兼容 (up_btn, None) 结构
             if hide_sort:
                 w.config(text="", width=0, padx=0, cursor="")
             else:

@@ -1761,9 +1761,110 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     settings_inline.pack_forget()
     add_inline.pack_forget()
 
-    # ---- 行情行 ----
-    body = tk.Frame(center, bg=style["bg"])
-    body.pack(fill="x")
+    # ---- 行情行(固定 5 行可视 + 右侧滚动条, 鼠标滚轮/拖条浏览更多股票) ----
+    # 外层 body_wrap 含 Canvas + 纵向 Scrollbar; 内部 body 是 Canvas 上的子 Frame,
+    # 行情行仍在 body 内 pack(原有 _build_quote_row / _reload_stocks 重排逻辑不变)。
+    body_wrap = tk.Frame(center, bg=style["bg"])
+    body_wrap.pack(fill="x")
+    # 可视行数: 固定 5 行; 行高按 20px 估算(Menlo 7 号实际渲染高于 ROW_H=14,
+    # 5 行取 5×20=100px), 超出部分走滚动。
+    QUOTE_VISIBLE_ROWS = 5
+    QUOTE_ROW_H_EST = 20
+    body_canvas = tk.Canvas(body_wrap, bg=style["bg"], height=QUOTE_VISIBLE_ROWS * QUOTE_ROW_H_EST,
+                            highlightthickness=0, bd=0, width=1,
+                            yscrollincrement=QUOTE_ROW_H_EST)  # 滚轮每格 = 恰好一行
+    body_canvas.pack(side="left", fill="both", expand=True)
+    # 右侧栏: ▲ 滚动按钮 / 滚动条 / ▼ 滚动按钮(macOS Tk 只把 scrollWheel 投递给可滚动控件,
+    # 行情区 Label/Frame 收不到滚轮——▲▼ 按钮是不依赖滚轮事件的硬滚动入口, 点击逐行滚动)
+    side_bar = tk.Frame(body_wrap, bg=style["bg"])
+    side_bar.pack(side="right", fill="y")
+    up_arrow = tk.Label(side_bar, text="▲", bg=style["bg"], fg=style["fg_dim"],
+                        font=style["FONT_SM"], cursor="hand2")
+    up_arrow.pack(side="top", fill="x")
+    up_arrow.bind("<Button-1>", lambda e: body_canvas.yview_scroll(-1, "units"))
+    down_arrow = tk.Label(side_bar, text="▼", bg=style["bg"], fg=style["fg_dim"],
+                          font=style["FONT_SM"], cursor="hand2")
+    down_arrow.pack(side="bottom", fill="x")
+    down_arrow.bind("<Button-1>", lambda e: body_canvas.yview_scroll(1, "units"))
+    body_scroll = tk.Scrollbar(side_bar, orient="vertical", command=body_canvas.yview,
+                               width=14, bd=0, relief="flat")
+    body_scroll.pack(side="top", fill="both", expand=True)
+    body = tk.Frame(body_canvas, bg=style["bg"])
+    body_id = body_canvas.create_window((0, 0), window=body, anchor="nw")
+    body_canvas.configure(yscrollcommand=body_scroll.set)
+    # 内部 body 尺寸变化时刷新滚动区域(新增/删除/重排行后滚动条范围正确)
+    body.bind("<Configure>",
+              lambda e: body_canvas.configure(scrollregion=body_canvas.bbox("all")))
+    # body 宽度跟随画布(否则行内容只占 body 自身请求宽度, 右侧留白)
+    body_canvas.bind("<Configure>",
+                     lambda e: body_canvas.itemconfigure(body_id, width=e.width))
+    # 滚轮驱动 canvas 滚动(统一出口): step 转 int(Tk 9 平滑滚动 delta 是浮点),
+    # 任何异常静默吞掉(如越界/已销毁), 不阻塞 UI。
+    def _scroll_canvas(step):
+        try:
+            body_canvas.yview_scroll(int(step), "units")
+        except Exception:
+            pass
+
+    # 鼠标滚轮: 任何 MouseWheel/Button-4/5 事件到达即滚动(不拦截、不判坐标)。
+    # 说明: macOS Tk9 只把 scrollWheel 投递给可滚动控件, 行情区 Label/Frame 收不到,
+    # 故 mac 上主要靠右侧 ▲▼ 按钮 / 滚动条拖动 / 滚动条上滚轮; 本绑定对 Linux/Windows 有效。
+    def _on_quote_wheel(e):
+        d = getattr(e, "delta", 0) or 0
+        num = getattr(e, "num", None)
+        if num == 4:
+            _scroll_canvas(-1)
+        elif num == 5:
+            _scroll_canvas(1)
+        elif d:
+            # Tk 9(macOS) 平滑滚动 delta 可能为浮点, 只取符号方向: d>0 内容上移
+            step = -1 if d > 0 else 1
+            if sys.platform == "win32":
+                step = -(int(d) // 120)
+            _scroll_canvas(step)
+        else:
+            # delta/num 都拿不到(Tk9 下 %d 可能为 0) → 默认向下滚一行, 保证有响应
+            _scroll_canvas(1)
+    body_canvas.bind("<MouseWheel>", _on_quote_wheel)
+    body.bind("<MouseWheel>", _on_quote_wheel)
+    root.bind_all("<MouseWheel>", _on_quote_wheel)
+    # macOS 第三方外接鼠标滚轮在 Tk 中常触发 <Button-4>/<Button-5>(模拟 X11)而非 <MouseWheel>,
+    # 故 darwin 也一并绑定(仅 Linux 绑会漏掉 mac 外接鼠)。行内子控件另在 _build_quote_row 补绑。
+    if sys.platform.startswith("linux") or sys.platform == "darwin":
+        body_canvas.bind("<Button-4>", _on_quote_wheel)
+        body_canvas.bind("<Button-5>", _on_quote_wheel)
+        body.bind("<Button-4>", _on_quote_wheel)
+        body.bind("<Button-5>", _on_quote_wheel)
+        root.bind_all("<Button-4>", _on_quote_wheel)
+        root.bind_all("<Button-5>", _on_quote_wheel)
+    # Tk 9(macOS) 平滑滚动专用: 滚轮增量走 %D(浮点), tkinter Event.delta 映射的是旧 %d
+    # (Tk9 下多为 0), 故在 Tcl 侧直接用 %D 驱动 yview, 绕开 tkinter 事件对象。
+    # 仅绑定到 body_canvas 本身: 鼠标悬停于内部子控件时事件经 bindtags 冒泡到 toplevel,
+    # 但 canvas 的绑定不会被子控件触发——故同时 bind_all(下方 _wheel_tcl_all)。
+    _cv = str(body_canvas)
+    _tcl_wheel = (
+        "if {[string is double -strict %D] && %D != 0} {"
+        f"  if {{%D < 0}} {{{_cv} yview scroll 1 units}} "
+        f"  else {{{_cv} yview scroll -1 units}}"
+        "} elseif {[string is double -strict %d] && %d != 0} {"
+        f"  if {{%d < 0}} {{{_cv} yview scroll 1 units}} "
+        f"  else {{{_cv} yview scroll -1 units}}"
+        "} else {"
+        f"  {{{_cv} yview scroll 1 units}}"   # %D/%d 均不可用 → 默认向下滚一行
+        "}"
+    )
+    body_canvas.bind("<MouseWheel>", _tcl_wheel, add="+")
+    root.bind_all("<MouseWheel>", _tcl_wheel, add="+")
+    # macOS 将 scrollWheel 投递给「键盘焦点」视图: 启动后把焦点给 body,
+    # 否则 overrideredirect 窗口可能收不到滚轮事件(滚动条拖动不受影响)。
+    root.after(300, lambda: (_silent_focus(root), _silent_focus(body)))
+
+    def _silent_focus(w):
+        try:
+            w.focus_set()
+            w.focus_force()
+        except Exception:
+            pass
     rows: Dict[str, tuple] = {}
     quote_frames: Dict[str, "tk.Frame"] = {}
     sig_frames: Dict[str, "tk.Frame"] = {}
@@ -1836,7 +1937,7 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         del_btn._orig_text = del_btn.cget("text")   # "🗑"
         del_btn._orig_padx = del_btn.cget("padx")   # (0, 1)
         del_btns[code] = del_btn
-        # 手动排序: 上移/下移箭头(位于删除按钮左侧, 紧贴其左)
+        # 手动排序: 仅上移箭头 ▲(位于删除按钮左侧, 紧贴其左); 下移 ▼ 已移除(2026-08-12)
         up_btn = tk.Label(f, text="▲", bg=style["bg"], fg=style["fg_dim"],
                           font=style["FONT_SM"], cursor="hand2")
         up_btn.pack(side="right", padx=(0, 0))
@@ -1844,14 +1945,8 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         up_btn._orig_text = up_btn.cget("text")   # "▲"
         up_btn._orig_padx = up_btn.cget("padx")   # (0, 0)
         up_btn.bind("<Button-1>", lambda e, c=code: _move_stock(c, "up"))
-        down_btn = tk.Label(f, text="▼", bg=style["bg"], fg=style["fg_dim"],
-                            font=style["FONT_SM"], cursor="hand2")
-        down_btn.pack(side="right", padx=(0, 0))
-        # 记录原始文本/内边距, 供「宽度折叠」显隐方案还原
-        down_btn._orig_text = down_btn.cget("text")   # "▼"
-        down_btn._orig_padx = down_btn.cget("padx")   # (0, 0)
-        down_btn.bind("<Button-1>", lambda e, c=code: _move_stock(c, "down"))
-        move_btns[code] = (up_btn, down_btn)
+        # move_btns 兼容旧二元组结构: (up_btn, None) —— down 已移除, 消费方遇 None 跳过
+        move_btns[code] = (up_btn, None)
         # 个股参数按钮(⚙, 功能④): 位于工具区最左(排序箭头左侧), 左键打开该股参数面板。
         # 同时是右键菜单不可靠(macOS)时配置参数的可达入口。
         param_btn = tk.Label(f, text="⚙", bg=style["bg"], fg=style["fg_dim"],
@@ -1869,7 +1964,17 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         # 右键菜单: 参数设置 + 删除(功能①④)——保留, 非 macOS 用户仍可用; mac 上以 ⚙/🗑 兜底
         f.bind("<Button-3>", lambda e, c=code: _show_row_menu(e, c))
         # 左键点击行情行(非工具按钮区域)复制股票代码(B2)
-        f.bind("<Button-1>", lambda e, c=code, t=(del_btn, up_btn, down_btn, param_btn): _on_row_click(e, c, t))
+        f.bind("<Button-1>", lambda e, c=code, t=(del_btn, up_btn, param_btn): _on_row_click(e, c, t))
+        # 滚轮兜底: 行 frame 及其全部子控件(名称/价格/涨幅/工具按钮)都绑 MouseWheel +
+        # Button-4/5(外接鼠), 确保鼠标悬停于行内任意 widget 上滚动都能驱动行情滚动
+        # (bind_all 在 macOS 不可靠时的补充)。
+        for _ch in (sig_l, name_l, price_l, chg_l, dl_l, del_btn, up_btn, param_btn):
+            _ch.bind("<MouseWheel>", _on_quote_wheel)
+            _ch.bind("<Button-4>", _on_quote_wheel)
+            _ch.bind("<Button-5>", _on_quote_wheel)
+        f.bind("<MouseWheel>", _on_quote_wheel)
+        f.bind("<Button-4>", _on_quote_wheel)
+        f.bind("<Button-5>", _on_quote_wheel)
 
     def _refresh_move_buttons():
         """刷新上移/下移箭头灰显: 首行 up_btn / 末行 down_btn 置为禁用色(与背景同色)。
@@ -1892,7 +1997,9 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             if bool(settings.get("hide_sort", False)):
                 continue
             up_btn.config(fg=(style["bg"] if i == 0 else style["fg_dim"]))
-            down_btn.config(fg=(style["bg"] if i == n - 1 else style["fg_dim"]))
+            # 下移箭头已移除(2026-08-12), down_btn 恒为 None, 仅兼容旧结构
+            if down_btn is not None:
+                down_btn.config(fg=(style["bg"] if i == n - 1 else style["fg_dim"]))
 
     def _apply_row_tools_visibility():
         """按 settings 的 hide_sort/hide_del/hide_param 即时显隐行情行右侧工具按钮(排序/删除/参数)。
@@ -1911,6 +2018,8 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
                 move_btns.pop(code, None)
                 continue
             for w in (up_btn, down_btn):
+                if w is None:
+                    continue  # 下移箭头已移除(2026-08-12), 兼容 (up_btn, None) 结构
                 if hide_sort:
                     w.config(text="", width=0, padx=0, cursor="")
                 else:
@@ -3105,12 +3214,12 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         offline = not snap
         # 窗口宽度锁定(首轮 capture + 每轮兜底): Configure 实时守卫锁宽度,
         # 本处周期级兜底(1~10s)作为冗余。高度完全放行——由内容自然撑高/收缩。
-        # 首轮用 winfo_reqwidth()(内容理想宽度)而非 winfo_width(), 避免初始尺寸过窄/过宽。
+        # 首轮用内容理想宽度(行情行 body 请求宽, 含被 Canvas 遮挡的标签宽度; root 的
+        # reqwidth 此时只反映画布 width=1 + 滚动条, 偏小), 避免初始尺寸过窄/过宽。
         w = root.winfo_width()
         if not width_locked["v"]:
-            req_w = root.winfo_reqwidth()
-            # req_w 可能为 1(窗口刚初始化, 内容未完成布局); 回退到 205 下限;
-            # -25 让内容稍微紧凑(不撑满全宽), 避免 visual noise。
+            req_w = max(root.winfo_reqwidth(), body.winfo_reqwidth())
+            # 下限 180 兜底(req_w 可能为 1: 窗口刚初始化, 内容未完成布局)
             target = max(req_w - 150, 180)
             if target > 0:
                 root.minsize(target, 1)
@@ -3146,7 +3255,7 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
                 chg_l.config(text=f"{sign}{chg:.2f}%", fg=col)
             else:
                 chg_l.config(text="", fg=style["flat"])
-            sig_l.config(text="●", fg=style["flat"])
+            sig_l.config(text="●", fg=sig_colors.get(sig, style["flat"]))
             # 延时标记已并入股票名(format_stock_name 处理), 此处留空避免重复
             dl_l.config(text="", fg=style["dl"])
             # 下半部分: 信号提示
