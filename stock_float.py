@@ -2771,7 +2771,7 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
                     if not re.fullmatch(r"#([0-9a-fA-F]{6})", hex_norm):
                         return                  # 防御: askcolor 几乎总返回合法值
                     settings[key] = hex_norm    # 原色入 settings(灰度由 build_style 应用)
-                    _save_config_key(key, hex_norm)
+                    _maybe_save(key, hex_norm)
                     swatch.config(bg=hex_norm)
                     txt.config(text=f"{label_text} {hex_norm}")
                     _reapply_style()            # 全量重刷(色已即时生效)
@@ -2796,13 +2796,19 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         # 被截断; 超出则自动换行而非撑大窗口。
         _wl = max(40, (root.winfo_width() or 200) // 2 - 20)
 
+        # 设置落盘守卫: persist_settings=False 时, 面板内所有设置改动仅内存生效, 不写
+        # config.toml(重启还原)。涨跌色/变动消息/隐藏排序删除参数/透明度/灰度 全部受控。
+        def _maybe_save(key, value):
+            if bool(settings.get("persist_settings", True)):
+                _save_config_key(key, value)
+
         # --- 变动消息提示开关(控制 OS 弹框+声音, 持久化) ---
         def _toggle_notify():
             on = not notifier.enabled
             notifier.enabled = on
             notifier.sound = on          # 单总开关: 弹框与声音同开同关
-            _save_config_key("notify", on)
-            _save_config_key("notify_sound", on)
+            _maybe_save("notify", on)
+            _maybe_save("notify_sound", on)
             notify_toggle.config(
                 text=("变动消息：开" if on else "变动消息：关"))
         notify_toggle = tk.Button(
@@ -2831,7 +2837,7 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         def _toggle_hide_sort():
             new = not bool(settings.get("hide_sort", False))
             settings["hide_sort"] = new
-            _save_config_key("hide_sort", new)
+            _maybe_save("hide_sort", new)
             hide_sort_toggle.config(
                 text=("隐藏排序：开" if new else "显示排序：关"))
             _apply_row_tools_visibility()
@@ -2847,7 +2853,7 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         def _toggle_hide_del():
             new = not bool(settings.get("hide_del", False))
             settings["hide_del"] = new
-            _save_config_key("hide_del", new)
+            _maybe_save("hide_del", new)
             hide_del_toggle.config(
                 text=("隐藏删除：开" if new else "显示删除：关"))
             _apply_row_tools_visibility()
@@ -2863,7 +2869,7 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         def _toggle_hide_param():
             new = not bool(settings.get("hide_param", False))
             settings["hide_param"] = new
-            _save_config_key("hide_param", new)
+            _maybe_save("hide_param", new)
             hide_param_toggle.config(
                 text=("隐藏参数按钮：开" if new else "显示参数按钮：关"))
             _apply_row_tools_visibility()
@@ -2886,6 +2892,25 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         freq_toggle.config(command=_toggle_freq)
         freq_toggle.grid(row=2, column=1, padx=4, pady=4, sticky="ew")
         freq_btn["w"] = freq_toggle
+
+        # --- 落盘设置总开关(持久化 persist_settings; row=3 col=0) ---
+        # 关闭后: 面板内所有设置(涨跌色/变动消息/隐藏排序删除参数/透明度/灰度/频率)
+        # 仅内存生效, 重启还原 config.toml 原值。元开关自身「始终写盘」——
+        # 否则无法保持关闭态(关闭状态本身也需要被记住)。
+        def _toggle_persist():
+            new = not bool(settings.get("persist_settings", True))
+            settings["persist_settings"] = new
+            _save_config_key("persist_settings", new)   # 元开关豁免 _maybe_save 守卫
+            persist_toggle.config(
+                text=("落盘设置：开" if new else "落盘设置：关"))
+            status.config(text=("已开启设置落盘" if new else "已关闭设置落盘(改动仅本次会话)"))
+        persist_toggle = tk.Button(
+            toggles_grid,
+            text=("落盘设置：开" if settings.get("persist_settings", True) else "落盘设置：关"),
+            bg=style["bg"], fg=style["fg"], font=style["FONT_SM"],
+            cursor="hand2", relief="flat", padx=6, pady=2, wraplength=_wl)
+        persist_toggle.config(command=_toggle_persist)
+        persist_toggle.grid(row=3, column=0, padx=4, pady=4, sticky="ew")
 
         def _close_settings():
             """点击收起: 隐藏设置面板并刷新几何。
@@ -2929,7 +2954,7 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             alpha = v
             ui["_alpha_base"] = v                  # 同步淡出基值, 淡出后以此还原
             settings["float_alpha"] = v
-            _save_config_key("float_alpha", v)
+            _maybe_save("float_alpha", v)
         _run_with_guard(_style_busy, _work)
 
     def _apply_grayness(val: float):
@@ -2945,7 +2970,7 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             nonlocal style
             style = build_style(settings)          # 重算含新灰度的完整样式字典
             _reapply_style()                       # 全量重刷配色
-            _save_config_key("grayness", v)
+            _maybe_save("grayness", v)
         _run_with_guard(_style_busy, _work)
 
     def _reapply_style():
@@ -3023,7 +3048,8 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         nonlocal alpha, style
         new = load_settings()
         for k in ("float_alpha", "grayness", "topmost", "show_signal",
-                  "hide_sort", "hide_del", "hide_param", "notify", "float_theme",
+                  "hide_sort", "hide_del", "hide_param", "persist_settings",
+                  "notify", "float_theme",
                   "float_font", "float_font_size", "refresh_sec"):
             if k in new:
                 settings[k] = new[k]

@@ -2789,7 +2789,7 @@ class TestReloadSettingsKeysContract(unittest.TestCase):
             n.value for n in ast.walk(self._reload)
             if isinstance(n, ast.Constant) and isinstance(n.value, str)
         }
-        for key in ("hide_param", "hide_sort", "hide_del"):
+        for key in ("hide_param", "hide_sort", "hide_del", "persist_settings"):
             self.assertIn(key, literals,
                           f"回归: _reload_settings 键列表缺 {key}(外部编辑热重载不生效)")
 
