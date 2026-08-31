@@ -2974,13 +2974,16 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         _run_with_guard(_style_busy, _work)
 
     def _reapply_style():
-        """用当前 style 字典重刷所有可见 widget 配色(灰度变更后调用)。
+        """重建 style 并全量重刷所有可见 widget 配色(灰度/涨跌色变更后调用)。
 
-        涨跌幅 chg_l 不动(保留红涨绿跌语义), 交由下一轮刷新循环按新 up/down 自然更新;
+        统一在此重建 style: 涨跌色/灰度等 settings 变更均经此生效(调用方
+        _apply_grayness/_reload_settings 已自行重建, 此处重复重建幂等无害)。
+        涨跌幅 chg_l 按现有文本符号立即重着色, 不等下一轮刷新循环;
         中性文本/背景色与 header 按钮立即刷新。
         """
-        nonlocal up_color, down_color, sig_colors
-        # 刷新随灰度变化的源色, 使下一轮刷新循环自动用新 up/down/信号色
+        nonlocal style, up_color, down_color, sig_colors
+        style = build_style(settings)                      # 重算(新涨跌色/灰度在此生效)
+        # 刷新随 settings 变化的源色, 使后续刷新循环自动用新 up/down/信号色
         up_color = style["up"]
         down_color = style["down"]
         sig_colors = style["sig_colors"]
@@ -2997,7 +3000,7 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         status.configure(bg=style["bg"], fg=style["fg_dim"])
         sighead.configure(bg=style["bg"], fg=style["fg_dim"])
         sep.configure(bg=style["sep"])
-        # 所有行情行背景 + 中性文本色(涨跌幅 chg_l 不动, 交由刷新循环更新)
+        # 所有行情行背景 + 中性文本色; 涨跌幅 chg_l 按现有文本符号立即重着色(选色即刻生效)
         for code, (sig_l, name_l, price_l, chg_l, dl_l) in rows.items():
             parent = name_l.master
             parent.configure(bg=style["bg"])
@@ -3005,6 +3008,11 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             price_l.configure(fg=style["fg"])
             dl_l.configure(fg=style["dl"])
             sig_l.configure(fg=style["flat"])                  # 左侧中性信号点随灰度
+            t = chg_l.cget("text")
+            if t.startswith("+"):
+                chg_l.configure(fg=up_color)
+            elif t.startswith("-"):
+                chg_l.configure(fg=down_color)
         # 信号行
         for code, (sdot, slv, sbb) in sig_rows.items():
             parent = sdot.master
