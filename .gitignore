@@ -8,6 +8,10 @@
 config.toml
 stocks.toml
 signals_*.csv
+signals.csv
+
+# ---- 生成产物 (历史交付概览等, 勿入库) ----
+overview.md
 
 # ---- QA 报告 (含环境路径, 不入库) ----
 QA_TEST_REPORT_stock_float.md
