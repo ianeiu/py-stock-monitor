@@ -20,6 +20,10 @@ csv_mode = "daily"
 # (配合省流触发规则使用, 避免重复写盘; 设为 0 关闭去重)
 csv_dedup_sec = 60
 
+# 信号落盘开关(默认开 true): 设为 false 时信号不再写入 signals*.csv;
+# GUI 设置面板可随时切换, 运行中即时生效
+csv_log = true
+
 # ---- 浮窗外观 ----
 # float_theme: light(亮) / dark(暗) / auto(跟随系统, mac 读 defaults, win 读注册表)
 float_theme = "light"

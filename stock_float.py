@@ -1305,6 +1305,13 @@ def signals_path(mode: str, date: Optional[str] = None) -> str:
     return SIGNAL_CSV
 
 
+def csv_logging_on(settings: dict, no_log: bool = False) -> bool:
+    """信号 CSV 落盘总开关: 命令行 --no-log 或 settings.csv_log=False 时关闭(默认开)。"""
+    if no_log:
+        return False
+    return bool(settings.get("csv_log", True))
+
+
 def append_signal(rec: dict, path: str, dedup_sec: float = 0.0) -> None:
     """把单次观测追加写入指定 CSV 文件 (首次自动写表头)。
     dedup_sec>0 时: 同 code 且 signal/price 未变且在窗口内则跳过(避免重复落盘)。
@@ -1920,9 +1927,9 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         f.pack(**QUOTE_PACK)
         sig_l = tk.Label(f, text="●", bg=style["bg"], fg=style["flat"], font=style["FONT"], width=2, anchor="w")
         sig_l.pack(side="left")
-        name_l = tk.Label(f, text=st["name"], bg=style["bg"], fg=style["fg"], font=style["FONT"], width=9, anchor="w")
+        name_l = tk.Label(f, text=st["name"], bg=style["bg"], fg=style["fg"], font=style["FONT"], width=6, anchor="w")
         name_l.pack(side="left")
-        price_l = tk.Label(f, text="--", bg=style["bg"], fg=style["fg"], font=style["FONT"], width=4, anchor="e")
+        price_l = tk.Label(f, text="--", bg=style["bg"], fg=style["fg"], font=style["FONT"], width=7, anchor="e")
         price_l.pack(side="left", padx=(0, 3))
         chg_l = tk.Label(f, text="", bg=style["bg"], fg=style["flat"], font=style["FONT"], width=6, anchor="e")
         chg_l.pack(side="left", padx=(3, 0))
@@ -2796,11 +2803,10 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         # 被截断; 超出则自动换行而非撑大窗口。
         _wl = max(40, (root.winfo_width() or 200) // 2 - 20)
 
-        # 设置落盘守卫: persist_settings=False 时, 面板内所有设置改动仅内存生效, 不写
-        # config.toml(重启还原)。涨跌色/变动消息/隐藏排序删除参数/透明度/灰度 全部受控。
+        # 设置改动统一落盘: 所有面板开关/滑块改动直接写 config.toml
+        # (2026-09-01 起移除 persist_settings 总开关, 默认一律持久化)。
         def _maybe_save(key, value):
-            if bool(settings.get("persist_settings", True)):
-                _save_config_key(key, value)
+            _save_config_key(key, value)
 
         # --- 变动消息提示开关(控制 OS 弹框+声音, 持久化) ---
         def _toggle_notify():
@@ -2893,24 +2899,23 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         freq_toggle.grid(row=2, column=1, padx=4, pady=4, sticky="ew")
         freq_btn["w"] = freq_toggle
 
-        # --- 落盘设置总开关(持久化 persist_settings; row=3 col=0) ---
-        # 关闭后: 面板内所有设置(涨跌色/变动消息/隐藏排序删除参数/透明度/灰度/频率)
-        # 仅内存生效, 重启还原 config.toml 原值。元开关自身「始终写盘」——
-        # 否则无法保持关闭态(关闭状态本身也需要被记住)。
-        def _toggle_persist():
-            new = not bool(settings.get("persist_settings", True))
-            settings["persist_settings"] = new
-            _save_config_key("persist_settings", new)   # 元开关豁免 _maybe_save 守卫
-            persist_toggle.config(
-                text=("落盘设置：开" if new else "落盘设置：关"))
-            status.config(text=("已开启设置落盘" if new else "已关闭设置落盘(改动仅本次会话)"))
-        persist_toggle = tk.Button(
+        # --- 信号落盘开关(持久化 csv_log; row=3 col=0) ---
+        # 关闭后信号不再写入 signals*.csv(运行中即时生效); 与「配置落盘」无关——
+        # 配置改动默认一律写 config.toml。
+        def _toggle_csv_log():
+            new = not bool(settings.get("csv_log", True))
+            settings["csv_log"] = new
+            _maybe_save("csv_log", new)
+            csv_toggle.config(
+                text=("信号落盘：开" if new else "信号落盘：关"))
+            status.config(text=("已开启信号落盘" if new else "已关闭信号落盘(不再写 CSV)"))
+        csv_toggle = tk.Button(
             toggles_grid,
-            text=("落盘设置：开" if settings.get("persist_settings", True) else "落盘设置：关"),
+            text=("信号落盘：开" if settings.get("csv_log", True) else "信号落盘：关"),
             bg=style["bg"], fg=style["fg"], font=style["FONT_SM"],
             cursor="hand2", relief="flat", padx=6, pady=2, wraplength=_wl)
-        persist_toggle.config(command=_toggle_persist)
-        persist_toggle.grid(row=3, column=0, padx=4, pady=4, sticky="ew")
+        csv_toggle.config(command=_toggle_csv_log)
+        csv_toggle.grid(row=3, column=0, padx=4, pady=4, sticky="ew")
 
         def _close_settings():
             """点击收起: 隐藏设置面板并刷新几何。
@@ -3056,8 +3061,8 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         nonlocal alpha, style
         new = load_settings()
         for k in ("float_alpha", "grayness", "topmost", "show_signal",
-                  "hide_sort", "hide_del", "hide_param", "persist_settings",
-                  "notify", "float_theme",
+                  "hide_sort", "hide_del", "hide_param",
+                  "csv_log", "notify", "float_theme",
                   "float_font", "float_font_size", "refresh_sec"):
             if k in new:
                 settings[k] = new[k]
@@ -3382,11 +3387,14 @@ def main() -> None:
     notify_snd = bool(settings.get("notify_sound", False))
     notifier = Notifier(enabled=notify_enabled, sound=notify_snd)
 
-    # CSV 落盘(省流规则: 首屏/信号变动/阈值穿越/支撑压力穿越才写); --no-log 关闭
-    log = not args.no_log
+    # CSV 落盘(省流规则: 首屏/信号变动/阈值穿越/支撑压力穿越才写); --no-log 或 csv_log=False 关闭
+    log = csv_logging_on(settings, args.no_log)
     csv_dedup_sec = _to_float(settings.get("csv_dedup_sec")) or 0.0
 
     def do_log(rec):
+        # 运行时开关动态生效: 面板切「信号落盘」后立即停止/恢复写盘(无需重启)
+        if not csv_logging_on(settings):
+            return
         append_signal(rec, csv_path, csv_dedup_sec)
 
     # 启动前并发预热日K缓存, 避免首个刷新周期卡顿

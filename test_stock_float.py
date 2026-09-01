@@ -1414,6 +1414,25 @@ class TestCsv(unittest.TestCase):
         self.assertEqual(rows[0]["reasons"], "r1;r2")
 
 
+class TestCsvLogSwitch(unittest.TestCase):
+    """信号落盘开关 csv_logging_on: 默认开; csv_log=False 或 --no-log 关(2026-09-01 新增)。"""
+
+    def test_default_on(self):
+        self.assertTrue(sf.csv_logging_on({}))
+        self.assertTrue(sf.csv_logging_on({"csv_log": True}))
+
+    def test_csv_log_false_off(self):
+        self.assertFalse(sf.csv_logging_on({"csv_log": False}))
+
+    def test_no_log_cli_wins(self):
+        # 命令行 --no-log 优先于 settings, 即使 csv_log=True 也关
+        self.assertFalse(sf.csv_logging_on({"csv_log": True}, no_log=True))
+        self.assertFalse(sf.csv_logging_on({}, no_log=True))
+
+    def test_no_log_and_csv_log_false(self):
+        self.assertFalse(sf.csv_logging_on({"csv_log": False}, no_log=True))
+
+
 # ----------------------------------------------------------------------------
 # 10. --stats / --review 过滤 + signals_path
 # ----------------------------------------------------------------------------
@@ -2789,9 +2808,17 @@ class TestReloadSettingsKeysContract(unittest.TestCase):
             n.value for n in ast.walk(self._reload)
             if isinstance(n, ast.Constant) and isinstance(n.value, str)
         }
-        for key in ("hide_param", "hide_sort", "hide_del", "persist_settings"):
+        for key in ("hide_param", "hide_sort", "hide_del", "csv_log"):
             self.assertIn(key, literals,
                           f"回归: _reload_settings 键列表缺 {key}(外部编辑热重载不生效)")
+
+    def test_reload_settings_drops_persist_settings(self):
+        """persist_settings 总开关已移除(2026-09-01), 键列表不应再含它。"""
+        literals = {
+            n.value for n in ast.walk(self._reload)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)
+        }
+        self.assertNotIn("persist_settings", literals)
 
 
 class TestMacWindowZoomDisabled(unittest.TestCase):
