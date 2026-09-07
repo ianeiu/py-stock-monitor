@@ -2286,6 +2286,10 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             q = q_entry.get().strip()
             if not q:
                 return
+            # 便利: 显示名若为空, 自动填入搜索词(不覆盖已填/已选结果的名字)
+            if not name_entry.get().strip():
+                name_entry.delete(0, tk.END)
+                name_entry.insert(0, q)
             results.clear()
             result_lb.delete(0, tk.END)
             result_lb.insert(tk.END, "搜索中…")
