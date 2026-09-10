@@ -1701,6 +1701,9 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
                            font=style["FONT_SM"], cursor="hand2")
     refresh_btn.pack(side="left", padx=(0, 1))
     refresh_btn.bind("<Button-1>", lambda e: _force_refresh())
+    # 记录原始文本/内边距: mini 模式用「宽度折叠」隐藏本按钮, 退出时按此还原
+    refresh_btn._orig_text = refresh_btn.cget("text")
+    refresh_btn._orig_padx = refresh_btn.cget("padx")
 
     # 频率控件(1/5/10s 循环)
     # 刷新频率按钮(已移至设置面板, 此处保留引用占位供 _cycle_freq / _reapply_style 使用;
@@ -1722,18 +1725,40 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         sig_btn.config(text=("🔔" if on else "🔕"),
                        fg=(style["fg"] if on else style["fg_dim"]))
     sig_btn.bind("<Button-1>", lambda e: _toggle_signal_label())
+    sig_btn._orig_text = sig_btn.cget("text")
+    sig_btn._orig_padx = sig_btn.cget("padx")
 
     # 运行时增删自选: ＋ 按钮(header 左起第 3 位)
     add_btn = tk.Label(header, text=" ＋ ", bg=style["header"], fg=style["fg_dim"],
                        font=style["FONT_SM"], cursor="hand2")
     add_btn.pack(side="left", padx=(0, 1))
     add_btn.bind("<Button-1>", lambda e: _add_stock_dialog())
+    add_btn._orig_text = add_btn.cget("text")
+    add_btn._orig_padx = add_btn.cget("padx")
 
     # 设置面板: ⚙️ 按钮(透明度+灰度+变动消息), 点开实时调节并持久化
     set_btn = tk.Label(header, text=" ⚙ ", bg=style["header"], fg=style["fg_dim"],
                        font=style["FONT_SM"], cursor="hand2")
     set_btn.pack(side="left", padx=(0, 1))
     set_btn.bind("<Button-1>", lambda e: _open_settings_panel())
+    set_btn._orig_text = set_btn.cget("text")
+    set_btn._orig_padx = set_btn.cget("padx")
+
+    # mini 模式开关(header 最右): 点击后窗口只留行情行「名称 + 涨跌幅」与一个恢复按钮,
+    # 信号区/状态栏/价格/信号点/工具按钮全部收起(运行时态, 不落盘)。
+    mini_btn = tk.Label(header, text=" mini ", bg=style["header"], fg=style["fg_dim"],
+                        font=style["FONT_SM"], cursor="hand2")
+    mini_btn.pack(side="left", padx=(0, 1))
+    mini_btn._orig_text = mini_btn.cget("text")
+    mini_btn._orig_padx = mini_btn.cget("padx")
+
+    def _toggle_mini():
+        """切换 mini / 正常模式: 改状态 + 换按钮文案 + 应用显隐与窗口宽度。"""
+        ui["mini"] = not bool(ui.get("mini"))
+        mini_btn.config(text=(" full " if ui["mini"] else " mini "))
+        _apply_mini_mode()
+
+    mini_btn.bind("<Button-1>", lambda e: _toggle_mini())
 
     drag = {"x": 0, "y": 0}
 
@@ -1886,7 +1911,8 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     # 行情行异动闪动待触发标记: worker 线程写入(异步事件), refresh 主线程消费并真正改背景色
     # (Tk 非线程安全, 所有 widget.config 必须发生在主线程, 故经 refresh 的 root.after 循环执行)
     flash_pending: Dict[str, bool] = {}
-    ui = {"topmost": bool(settings.get("topmost", True)), "show_signal": True}
+    ui = {"topmost": bool(settings.get("topmost", True)), "show_signal": True,
+          "mini": False}   # mini: 只留行情行名称+涨跌幅的极简模式(运行时态, 不落盘)
     # 淡出基值: 用户设定的透明度, 鼠标移开淡出后以此还原(不被淡出值覆盖)
     ui["_alpha_base"] = alpha
     # 内联面板展开态(显式布尔, 不依赖 winfo_ismapped——macOS Tk 上该值不可信,
@@ -1900,6 +1926,28 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     # target: 锁定宽度值。不锁高度——高度由内容驱动(面板展开/加股票/信号行变化),
     #   通过 refresh 周期守卫兜底(1~10s)检测高度异常。如果在这里锁高度, 面板一展开就被截断。
     width_locked = {"v": False, "target": None}
+
+    def _sync_window_width():
+        """同步窗口宽度: 未锁定时按当前内容理想宽锁定(minsize=maxsize), 已锁定时兜底纠正。
+
+        只锁宽度、不锁高度(高度由内容驱动)。width_locked 被复位时(如 mini 模式切换导致
+        内容宽度变化)会按新内容重新锁定; mini 模式的下限更窄(120 vs 常规 180)。
+        """
+        w = root.winfo_width()
+        if not width_locked["v"]:
+            req_w = max(root.winfo_reqwidth(), body.winfo_reqwidth())
+            floor = 120 if ui.get("mini") else 180
+            target = max(req_w - 150, floor)
+            if target > 0:
+                root.minsize(target, 1)
+                root.maxsize(target, 100000)
+                width_locked["v"] = True
+                width_locked["target"] = target
+        elif w and w > 0 and w != width_locked["target"]:
+            # 兜底: 宽度被拉大(极少情况, Configure 守卫已拦下绝大多数) → 强制恢复
+            h = root.winfo_height()
+            root.geometry(f"{width_locked['target']}x{h}")
+            root.update_idletasks()
 
     # 防缩放守卫(实时): 监听 root 的 <Configure> 事件, **仅**在宽度偏离锁值时强制恢复。
     # 高度完全不干预(内容自然撑高/收缩, 由 refresh 周期守卫兜底处理 zoom 残留的异常高度)。
@@ -1927,10 +1975,17 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         f.pack(**QUOTE_PACK)
         sig_l = tk.Label(f, text="●", bg=style["bg"], fg=style["flat"], font=style["FONT"], width=2, anchor="w")
         sig_l.pack(side="left")
+        # 记录原始文本/宽度/内边距: mini 模式用「宽度折叠」隐藏信号点与价格, 退出时还原
+        sig_l._orig_text = sig_l.cget("text")
+        sig_l._orig_width = sig_l.cget("width")
+        sig_l._orig_padx = sig_l.cget("padx")
         name_l = tk.Label(f, text=st["name"], bg=style["bg"], fg=style["fg"], font=style["FONT"], width=6, anchor="w")
         name_l.pack(side="left")
         price_l = tk.Label(f, text="--", bg=style["bg"], fg=style["fg"], font=style["FONT"], width=7, anchor="e")
         price_l.pack(side="left", padx=(0, 3))
+        price_l._orig_text = price_l.cget("text")
+        price_l._orig_width = price_l.cget("width")
+        price_l._orig_padx = price_l.cget("padx")
         chg_l = tk.Label(f, text="", bg=style["bg"], fg=style["flat"], font=style["FONT"], width=6, anchor="e")
         chg_l.pack(side="left", padx=(3, 0))
         dl_l = tk.Label(f, text="", bg=style["bg"], fg=style["dl"], font=style["FONT_SM"], width=2, anchor="w")
@@ -1999,9 +2054,9 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             if not up_btn.winfo_exists():
                 move_btns.pop(c, None)
                 continue
-            # 若「隐藏排序」开启, 箭头已被 pack_forget, 跳过灰显配置(避免对隐藏 widget 无谓操作)。
+            # 若「隐藏排序」开启或处于 mini 模式, 箭头已折叠, 跳过灰显配置(避免对隐藏 widget 无谓操作)。
             # 注意: 不依赖 winfo_ismapped()(macOS Tk 上该值不可靠, 会导致永远跳过)。
-            if bool(settings.get("hide_sort", False)):
+            if bool(settings.get("hide_sort", False)) or ui.get("mini"):
                 continue
             up_btn.config(fg=(style["bg"] if i == 0 else style["fg_dim"]))
             # 下移箭头已移除(2026-08-12), down_btn 恒为 None, 仅兼容旧结构
@@ -2009,15 +2064,28 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
                 down_btn.config(fg=(style["bg"] if i == n - 1 else style["fg_dim"]))
 
     def _apply_row_tools_visibility():
-        """按 settings 的 hide_sort/hide_del/hide_param 即时显隐行情行右侧工具按钮(排序/删除/参数)。
+        """按 settings 的 hide_sort/hide_del/hide_param 与 mini 模式即时显隐行情行右侧工具按钮。
 
         采用「宽度折叠」而非 pack_forget/pack: 隐藏时清文本+宽度0+内边距0(水平空间塌缩为0),
         显示时还原原始文本/内边距。macOS Tk 上反复 pack_forget/pack 偶发「第二次隐藏失效」,
         此方案不触发几何抖动, 对任意次数 toggle 幂等稳健。
+        mini 模式下: 工具按钮一律折叠, 且信号点/价格也折叠(只留名称+涨跌幅)。
         """
-        hide_sort = bool(settings.get("hide_sort", False))
-        hide_del = bool(settings.get("hide_del", False))
-        hide_param = bool(settings.get("hide_param", False))
+        mini = bool(ui.get("mini"))
+        hide_sort = bool(settings.get("hide_sort", False)) or mini
+        hide_del = bool(settings.get("hide_del", False)) or mini
+        hide_param = bool(settings.get("hide_param", False)) or mini
+        # mini: 折叠左侧信号点与价格列(只留股票名 + 涨跌幅); 退出时按原始宽度还原
+        for code, (_sig, _name, _price, _chg, _dl) in list(rows.items()):
+            if not (_sig.winfo_exists() and _price.winfo_exists()):
+                continue
+            if mini:
+                _sig.config(text="", width=0, padx=0)
+                _price.config(text="", width=0, padx=0)
+            else:
+                _sig.config(text=_sig._orig_text, width=_sig._orig_width, padx=_sig._orig_padx)
+                _price.config(text=_price._orig_text, width=_price._orig_width,
+                              padx=_price._orig_padx)
         for code, (up_btn, down_btn) in list(move_btns.items()):
             # 防御: 跳过已被 destroy 的残留引用(如极端情况下删除股票后未清理干净的 code),
             # 避免对已销毁 widget 调 .config() 抛 TclError: invalid command name
@@ -2060,8 +2128,8 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         -> 按新顺序重排 UI 显示(pack 追加到父容器末尾) -> 协调过滤可见性
         -> 刷新箭头灰显 -> 回写 stocks.toml(reorder)。仅内存模式(stocks_path 为空)则跳过写回。
         """
-        # 守卫: hide_sort 开启时排序箭头已视觉隐藏, 拒绝误点(宽度折叠只是视觉, 绑定还在)
-        if bool(settings.get("hide_sort", False)):
+        # 守卫: hide_sort 开启或 mini 模式下排序箭头已折叠, 拒绝误点(宽度折叠只是视觉, 绑定还在)
+        if bool(settings.get("hide_sort", False)) or ui.get("mini"):
             return
         # 边界: code 不存在直接返回
         if not any(s["code"] == code for s in stocks):
@@ -2296,6 +2364,12 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             threading.Thread(target=lambda: _run_search(q), daemon=True).start()
 
         def _on_select(event=None):
+            """选中搜索结果: 只确定代码(供「添加」使用), **不覆盖**用户已填的显示名。
+
+            显示名在点「搜索」时已自动预填搜索词; 若用户手动改过则以其为准。
+            仅当显示名为空时才兜底填官方全名。
+            (2026-09-10 用户反馈: 原实现无条件把官方全名写回显示名, 覆盖用户输入, 属错误交互)
+            """
             sel = result_lb.curselection()
             if not sel:
                 return
@@ -2305,8 +2379,11 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             chosen = results[idx]
             selected["code"] = chosen["code"]
             selected["name"] = chosen["name"]
-            name_entry.delete(0, tk.END)
-            name_entry.insert(0, chosen["name"])
+            if not name_entry.get().strip():
+                name_entry.delete(0, tk.END)
+                name_entry.insert(0, chosen["name"])
+            # 状态栏反馈选中项(显示名不再变化, 需让用户明确知道选中了哪只)
+            status.config(text=f"已选 {chosen['name']} ({chosen['code']})")
 
         def _on_add():
             code = selected["code"]
@@ -2652,7 +2729,8 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     def _toggle_signal():
         """切换信号提示显隐(功能①)。关闭时整块隐藏(含标题/分隔线/容器); 开启时恢复。"""
         ui["show_signal"] = not ui["show_signal"]
-        on = ui["show_signal"]
+        # mini 模式下信号区强制隐藏(该模式下 header 的 🔔 已折叠, 此处仅作状态一致性保护)
+        on = ui["show_signal"] and not ui.get("mini")
         # 整块显隐: 分隔线 / 信号标题 / 信号容器
         # 按 on 直接 pack/pack_forget(pack 对已映射控件幂等, pack_forget 对未映射是无操作),
         # 不依赖 winfo_ismapped()(macOS Tk 上该值不可信, 会导致该隐不隐/该显不显)。
@@ -2674,6 +2752,82 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
                 row_vis[c] = vis
         status.config(text=("🔔 信号提示开" if on else "🔕 信号提示关"))
         root.update_idletasks()
+
+    # ---- mini 模式: 窗口只留行情行「名称 + 涨跌幅」+ 一个恢复按钮 ----
+    def _sync_header_buttons():
+        """按 ui['mini'] 无条件 apply header 按钮显隐(宽度折叠), 幂等。
+
+        mini: 折叠 ↺/🔔/＋/⚙(清文本 + 内边距归零 + 去手型光标), 只留 mini 按钮;
+        正常: 还原原始文本/内边距/光标(sig_btn 的 🔔/🔕 按当前 show_signal 状态还原)。
+
+        用 cget("text") 判断当前态, 状态一致时不做 config(避免每轮无谓的 Tk 调用)。
+        本函数在 mini 切换时调用, 并在 refresh 每轮兜底调用(某次 apply 异常可自愈)。
+        """
+        on = bool(ui.get("mini"))
+        for w in (refresh_btn, sig_btn, add_btn, set_btn):
+            if on:
+                if str(w.cget("text") or "").strip():
+                    w.config(text="", padx=0, cursor="")
+            else:
+                if not str(w.cget("text") or "").strip():
+                    text = (("🔔" if ui["show_signal"] else "🔕")
+                            if w is sig_btn else w._orig_text)
+                    w.config(text=text, padx=w._orig_padx, cursor="hand2")
+
+    def _apply_mini_mode():
+        """按 ui['mini'] 应用 mini / 正常模式的显隐(纯视觉, 不落盘)。
+
+        mini: header 只留 mini 按钮; 隐藏分隔线/信号标题/信号容器/状态栏;
+              行情行折叠信号点与价格(只留股票名 + 涨跌幅)、折叠全部工具按钮;
+              隐藏侧栏滚动条(▲▼ 箭头保留); 可视行数与常规模式一致(5 行);
+              收起已展开的内联面板; 宽度按新内容重新锁定(更窄, 下限 120)。
+        正常: 逐项还原(工具按钮按 hide_sort/hide_del/hide_param 恢复)。
+        显隐一律「按目标态无条件 apply」, 不查 winfo_ismapped(macOS Tk 该值不可信)。
+        """
+        on = bool(ui.get("mini"))
+        # 1) header 按钮显隐(按目标态 apply)。恢复文本后**必须立即 update_idletasks**:
+        #    否则 Tk 的点击(hit-test)区域仍是折叠时的 ~0 宽, 按钮虽显示却"点了没反应"
+        #    (2026-09-10 实测 bug: mini 切回 full 后 header 按钮失效)。
+        _sync_header_buttons()
+        root.update_idletasks()
+        # 2) 进入 mini 时收起所有内联面板(设置/添加/参数), 避免极简窗口挂着一堆控件
+        if on:
+            if panel_state["settings"]:
+                settings_inline.pack_forget()
+                panel_state["settings"] = False
+            if panel_state["add"] and add_inline is not None:
+                add_inline._close()
+                panel_state["add"] = False   # _close() 自身不复位面板态, 必须显式清(否则再点＋要按两次)
+            if panel_state["param"]:
+                param_inline.pack_forget()
+                panel_state["param"] = None
+        # 3) 状态栏: mini 隐藏; 正常显示
+        if on:
+            status.pack_forget()
+        else:
+            status.pack(fill="x", padx=2, pady=(0, 0))
+        # 4) 分隔线/信号标题/信号容器: mini 或 show_signal=False 时隐藏
+        #    (先 pack status 再以 before=status 插入, 维持原有上下顺序)
+        if (not on) and ui["show_signal"]:
+            sep.pack(fill="x", padx=4, pady=1, before=status)
+            sighead.pack(fill="x", padx=4, pady=(0, 0), before=status)
+            sigpane.pack(fill="x", before=status)
+        else:
+            sep.pack_forget()
+            sighead.pack_forget()
+            sigpane.pack_forget()
+        # 5) 行情行内的信号点/价格/工具按钮由统一出口处理(同时覆盖 hide_* 配置)
+        _apply_row_tools_visibility()
+        # 6) 侧栏滚动条: mini 隐藏(▲▼ 箭头保留, 滚动入口不丢); 可视行数与常规模式一致(5 行)
+        if on:
+            body_scroll.pack_forget()
+        else:
+            body_scroll.pack(side="top", fill="both", expand=True)
+        # 7) 内容宽度已变 → 复位锁定并按新内容重新锁定(只锁宽不锁高)
+        width_locked["v"] = False
+        width_locked["target"] = None
+        root.update_idletasks()
+        _sync_window_width()
 
     # ---- 设置面板: 透明度 + 灰度(实时生效 + 持久化) ----
     # ---- 设置面板: 从 Toplevel 弹窗改为主窗口下方内联展示(透明度 + 灰度, 实时生效 + 持久化) ----
@@ -3030,7 +3184,7 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             sbb.configure(fg=style["fg_dim"])
             # sdot 语义色保持 sig_colors(由刷新循环按信号着色, 此处不动)
         # header 按钮(统一底色 + dim 高亮; 特殊高亮由各 toggle 自管)
-        for btn in (refresh_btn, add_btn, sig_btn, set_btn):
+        for btn in (refresh_btn, add_btn, sig_btn, set_btn, mini_btn):
             btn.configure(bg=style["header"], fg=style["fg_dim"])
         root.update_idletasks()
 
@@ -3259,22 +3413,9 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         # 本处周期级兜底(1~10s)作为冗余。高度完全放行——由内容自然撑高/收缩。
         # 首轮用内容理想宽度(行情行 body 请求宽, 含被 Canvas 遮挡的标签宽度; root 的
         # reqwidth 此时只反映画布 width=1 + 滚动条, 偏小), 避免初始尺寸过窄/过宽。
-        w = root.winfo_width()
-        if not width_locked["v"]:
-            req_w = max(root.winfo_reqwidth(), body.winfo_reqwidth())
-            # 下限 180 兜底(req_w 可能为 1: 窗口刚初始化, 内容未完成布局)
-            target = max(req_w - 150, 180)
-            if target > 0:
-                root.minsize(target, 1)
-                root.maxsize(target, 100000)
-                width_locked["v"] = True
-                width_locked["target"] = target
-        elif w and w > 0:
-            if w != width_locked["target"]:
-                # 兜底: 宽度被拉大(极少情况, Configure 守卫已拦下绝大多数) → 强制恢复
-                h = root.winfo_height()
-                root.geometry(f"{width_locked['target']}x{h}")
-                root.update_idletasks()
+        _sync_window_width()
+        # 兜底: mini 模式 header 按钮显隐每轮自愈(幂等, 状态一致时不产生 config 调用)
+        _sync_header_buttons()
         for st in stocks:
             code = st["code"]
             # 信号行(下半)默认只展示有信号变动的股票; 信号提示关闭时一律隐藏(运行时态短路)
@@ -3291,14 +3432,21 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             sig = r.get("signal")
             delayed = bool(r.get("delayed"))
             name_l.config(text=format_stock_name(st["name"], delayed))
-            price_l.config(text=f"{price:.2f}" if isinstance(price, (int, float)) else "--")
+            if ui.get("mini"):
+                # mini 模式: 价格列与信号点已折叠(宽度折叠靠「空文本」实现), 每轮刷新必须保持空文本,
+                # 否则会被重新写入文本而"复活"(2026-09-10 修复: 用户反馈信号灯/价格仍在)。
+                price_l.config(text="")
+                sig_l.config(text="")
+            else:
+                price_l.config(text=f"{price:.2f}" if isinstance(price, (int, float)) else "--")
+                sig_l.config(text="●", fg=sig_colors.get(sig, style["flat"]))
+            # 涨跌幅: mini 与常规模式都保留(是 mini 模式的核心信息)
             if isinstance(chg, (int, float)):
                 col = up_color if chg > 0 else (down_color if chg < 0 else style["flat"])
                 sign = "+" if chg > 0 else ""
                 chg_l.config(text=f"{sign}{chg:.2f}%", fg=col)
             else:
                 chg_l.config(text="", fg=style["flat"])
-            sig_l.config(text="●", fg=sig_colors.get(sig, style["flat"]))
             # 延时标记已并入股票名(format_stock_name 处理), 此处留空避免重复
             dl_l.config(text="", fg=style["dl"])
             # 下半部分: 信号提示

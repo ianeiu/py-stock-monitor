@@ -802,14 +802,15 @@ class FakeWidget:
     用于回归测试「显隐逻辑不再依赖 winfo_ismapped」。
     """
 
-    def __init__(self, mapped=True, force_unmapped=False, text="▲", padx=(0, 0)):
+    def __init__(self, mapped=True, force_unmapped=False, text="▲", padx=(0, 0), width=0):
         self._mapped = mapped
         self._force_unmapped = force_unmapped
         self._text = text
-        self._width = 0
+        self._width = width
         self._padx = padx
-        # 原始文本/内边距(由 _make_rows 按控件语义注入, 对应源码 build 处的 _orig_* 记录)
+        # 原始文本/宽度/内边距(由 _make_rows 按控件语义注入, 对应源码 build 处的 _orig_* 记录)
         self._orig_text = text
+        self._orig_width = width
         self._orig_padx = padx
         self._cursor = ""       # 记录最近一次 config(cursor=...) 值(隐藏时="", 显示时="hand2")
         self.pack_calls = 0
@@ -848,7 +849,8 @@ class FakeWidget:
 
 
 def _apply_row_tools_visibility_logic(move_btns, del_btns, hide_sort, hide_del,
-                                      param_btns=None, hide_param=False):
+                                      param_btns=None, hide_param=False,
+                                      rows=None, mini=False):
     """移植自 run_hud._apply_row_tools_visibility 的纯判定逻辑(去 Tk/root)。
 
     采用「宽度折叠」而非 pack_forget/pack: 隐藏时清文本+宽度0+内边距0(水平空间塌缩为0),
@@ -860,7 +862,21 @@ def _apply_row_tools_visibility_logic(move_btns, del_btns, hide_sort, hide_del,
 
     param_btns/hide_param: 个股参数按钮(⚙)显隐, 与 hide_sort/hide_del 同款宽度折叠;
     默认 None/False 以兼容既有调用点。
+
+    rows/mini(2026-09-10): mini 模式下工具按钮一律折叠, 且信号点/价格列折叠
+    (只留股票名 + 涨跌幅); rows 为 code -> (sig_l, name_l, price_l, chg_l, dl_l) 映射。
     """
+    if mini:
+        hide_sort = hide_del = hide_param = True
+    for code, tup in ((rows or {})).items():
+        sig_l, _name_l, price_l = tup[0], tup[1], tup[2]
+        if mini:
+            sig_l.config(text="", width=0, padx=0)
+            price_l.config(text="", width=0, padx=0)
+        else:
+            sig_l.config(text=sig_l._orig_text, width=sig_l._orig_width, padx=sig_l._orig_padx)
+            price_l.config(text=price_l._orig_text, width=price_l._orig_width,
+                           padx=price_l._orig_padx)
     for code, (up_btn, down_btn) in list(move_btns.items()):
         if not up_btn.winfo_exists():
             move_btns.pop(code, None)
@@ -930,6 +946,63 @@ class TestRowToolsVisibilityGuard(unittest.TestCase):
             self.assertEqual(up.cget("padx"), up._orig_padx)
             self.assertEqual(down.cget("text"), down._orig_text)
             self.assertEqual(down.cget("padx"), down._orig_padx)
+
+    def test_mini_mode_folds_price_sigdot_and_tools(self):
+        """mini=True: 工具按钮全部折叠 + 信号点/价格列折叠(只留股票名+涨跌幅); 退出后还原。
+
+        2026-09-10 mini 模式: 极简窗口只保留行情行的「显示名 + 涨跌幅」。
+        """
+        move_btns, del_btns = self._make_rows()
+        param_btns = {"A": FakeWidget(text="⚙", padx=(0, 1))}
+        rows = {"A": (
+            FakeWidget(text="●", width=2, padx=1),        # sig_l
+            FakeWidget(text="小米集团-W", width=6, padx=1),  # name_l(保留)
+            FakeWidget(text="--", width=7, padx=1),       # price_l
+            FakeWidget(text="+1.23%", width=6, padx=1),   # chg_l(保留)
+            FakeWidget(text="", width=2, padx=1),         # dl_l
+        )}
+        # 即使配置未开启隐藏, mini 也强制折叠工具按钮与价格/信号点
+        _apply_row_tools_visibility_logic(move_btns, del_btns, hide_sort=False, hide_del=False,
+                                          param_btns=param_btns, hide_param=False,
+                                          rows=rows, mini=True)
+        sig_l, name_l, price_l, chg_l, _dl = rows["A"]
+        self.assertEqual(price_l.cget("text"), "")
+        self.assertEqual(price_l.cget("width"), 0)
+        self.assertEqual(sig_l.cget("text"), "")
+        self.assertEqual(sig_l.cget("width"), 0)
+        self.assertEqual(name_l.cget("text"), "小米集团-W", "mini 下股票名必须保留")
+        self.assertEqual(chg_l.cget("text"), "+1.23%", "mini 下涨跌幅必须保留")
+        self.assertEqual(move_btns["A"][0].cget("text"), "", "mini 下排序箭头应折叠")
+        self.assertEqual(del_btns["A"].cget("text"), "", "mini 下删除按钮应折叠")
+        self.assertEqual(param_btns["A"].cget("text"), "", "mini 下参数按钮应折叠")
+        # 退出 mini -> 全部还原(工具按钮按 hide_* 配置, 此处均未开启故显示)
+        _apply_row_tools_visibility_logic(move_btns, del_btns, hide_sort=False, hide_del=False,
+                                          param_btns=param_btns, hide_param=False,
+                                          rows=rows, mini=False)
+        self.assertEqual(price_l.cget("text"), "--")
+        self.assertEqual(price_l.cget("width"), 7)
+        self.assertEqual(sig_l.cget("text"), "●")
+        self.assertEqual(sig_l.cget("width"), 2)
+        self.assertEqual(move_btns["A"][0].cget("text"), "▲")
+        self.assertEqual(del_btns["A"].cget("text"), "🗑")
+        self.assertEqual(param_btns["A"].cget("text"), "⚙")
+
+    def test_mini_mode_toggle_is_idempotent(self):
+        """mini 反复切换幂等: 多次 True/False 后最终状态与单次一致(宽度折叠方案特性)。"""
+        move_btns, del_btns = self._make_rows()
+        rows = {"A": (FakeWidget(text="●", width=2), FakeWidget(text="小米", width=6),
+                      FakeWidget(text="--", width=7), FakeWidget(text="+1%", width=6),
+                      FakeWidget(text="", width=2))}
+        for _ in range(3):
+            _apply_row_tools_visibility_logic(move_btns, del_btns, False, False,
+                                              rows=rows, mini=True)
+            _apply_row_tools_visibility_logic(move_btns, del_btns, False, False,
+                                              rows=rows, mini=False)
+        sig_l, _name, price_l, _chg, _dl = rows["A"]
+        self.assertEqual(price_l.cget("width"), 7)
+        self.assertEqual(price_l.cget("text"), "--")
+        self.assertEqual(sig_l.cget("text"), "●")
+        self.assertEqual(move_btns["A"][0].cget("text"), "▲")
 
     def test_hide_del_toggles_delete_button(self):
         move_btns, del_btns = self._make_rows()
@@ -2821,6 +2894,142 @@ class TestReloadSettingsKeysContract(unittest.TestCase):
         self.assertNotIn("persist_settings", literals)
 
 
+class TestMiniModeContract(unittest.TestCase):
+    """mini 模式契约锁(2026-09-10): 极简窗口只留行情行「名称+涨跌幅」+ 恢复按钮。
+
+    - ui 状态字典必须含 "mini" 键(运行时态, 不落盘);
+    - run_hud 内必须有 _apply_mini_mode 定义(统一显隐出口);
+    - 行情行显隐出口 _apply_row_tools_visibility 必须感知 mini(否则新增/热重载的行
+      在 mini 下仍会显示价格与工具按钮)。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls._src = Path(sf.__file__).read_text(encoding="utf-8")
+        cls._tree = ast.parse(cls._src)
+        cls._hud = next(n for n in cls._tree.body
+                        if isinstance(n, ast.FunctionDef) and n.name == "run_hud")
+        cls._hud_names = {f.name for f in cls._hud.body if isinstance(f, ast.FunctionDef)}
+
+    def test_mini_state_key_exists(self):
+        self.assertIn('"mini"', self._src,
+                      "回归: ui 状态缺 'mini' 键(mini 模式运行态丢失)")
+
+    def test_apply_mini_mode_defined(self):
+        self.assertIn("_apply_mini_mode", self._hud_names,
+                      "回归: run_hud 内缺 _apply_mini_mode(mini 模式无统一显隐出口)")
+
+    def test_row_tools_visibility_aware_of_mini(self):
+        """_apply_row_tools_visibility 必须读取 ui['mini'] —— mini 下折叠价格/工具按钮。"""
+        fn = next(f for f in self._hud.body
+                  if isinstance(f, ast.FunctionDef) and f.name == "_apply_row_tools_visibility")
+        literals = {n.value for n in ast.walk(fn)
+                    if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+        self.assertIn("mini", literals,
+                      "回归: _apply_row_tools_visibility 未感知 mini(工具按钮/价格不折叠)")
+
+    def test_sync_window_width_extracted(self):
+        """宽度锁定逻辑抽为 _sync_window_width(mini 切换需立即重锁宽度, 不能只等 refresh)。"""
+        self.assertIn("_sync_window_width", self._hud_names,
+                      "回归: 缺 _sync_window_width(mini 切换后宽度无法立即重算)")
+
+    def test_mini_keeps_same_visible_rows(self):
+        """mini 可视行数与常规模式一致(5 行), 不再收窄(2026-09-10 用户要求恢复)。
+
+        锁定: 源码中不存在 MINI_VISIBLE_ROWS(该收窄方案已撤销), 且 body_canvas 初始高度
+        仍由 QUOTE_VISIBLE_ROWS 决定。
+        """
+        self.assertNotIn("MINI_VISIBLE_ROWS", self._src,
+                         "回归: MINI_VISIBLE_ROWS 应已移除(mini 行数已恢复与 full 一致)")
+        self.assertIn("QUOTE_VISIBLE_ROWS * QUOTE_ROW_H_EST", self._src,
+                      "回归: body_canvas 高度应仍由 QUOTE_VISIBLE_ROWS 决定")
+
+    def test_apply_mini_mode_toggles_scrollbar(self):
+        """_apply_mini_mode 内必须处理侧栏滚动条(否则 mini 下滚动条不隐藏)。"""
+        fn = next(f for f in self._hud.body
+                  if isinstance(f, ast.FunctionDef) and f.name == "_apply_mini_mode")
+        names = set()
+        for n in ast.walk(fn):
+            if isinstance(n, ast.Name):
+                names.add(n.id)
+            elif isinstance(n, ast.Attribute):
+                names.add(n.attr)
+        self.assertIn("body_scroll", names,
+                      "回归: _apply_mini_mode 未处理滚动条(mini 下滚动条不隐藏)")
+
+    def test_on_select_does_not_overwrite_display_name(self):
+        """添加面板点选搜索结果时, 显示名不能被无条件覆盖(2026-09-10 交互修正)。
+
+        name_entry.insert(...) 必须被 If 包裹 —— 仅在显示名为空时兜底填官方全名;
+        用户在搜索时预填的词/手动改的名字必须保留。
+        """
+        add_panel = next(f for f in self._hud.body
+                         if isinstance(f, ast.FunctionDef) and f.name == "_build_add_panel")
+        on_select = next(f for f in add_panel.body
+                         if isinstance(f, ast.FunctionDef) and f.name == "_on_select")
+        parents = {}
+        for node in ast.walk(on_select):
+            for child in ast.iter_child_nodes(node):
+                parents[child] = node
+        inserts = [n for n in ast.walk(on_select)
+                   if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                   and n.func.attr == "insert"]
+        self.assertTrue(inserts, "回归: _on_select 未见 name_entry.insert 兜底逻辑")
+        for ins in inserts:
+            node, guarded = ins, False
+            while node in parents:
+                node = parents[node]
+                if isinstance(node, ast.If):
+                    guarded = True
+                    break
+            self.assertTrue(guarded,
+                            "回归: _on_select 无条件覆盖显示名(应仅在显示名为空时兜底)")
+
+    def test_header_buttons_sync_extracted_and_called_every_refresh(self):
+        """_sync_header_buttons 必须存在, 且 refresh 每轮调用(header 按钮显隐自愈)。
+
+        2026-09-10 bug: mini 切回 full 后 header 按钮"点了没反应" —— 恢复文本后未立即
+        重算几何, 点击区域仍是折叠时的 ~0 宽。修复: 抽 _sync_header_buttons + 切换时立即
+        update_idletasks + refresh 每轮兜底 apply。
+        """
+        self.assertIn("_sync_header_buttons", self._hud_names,
+                      "回归: 缺 _sync_header_buttons(header 按钮显隐无统一出口)")
+        refresh = next(f for f in self._hud.body
+                       if isinstance(f, ast.FunctionDef) and f.name == "refresh")
+        called = any(
+            isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+            and n.func.id == "_sync_header_buttons"
+            for n in ast.walk(refresh)
+        )
+        self.assertTrue(called,
+                        "回归: refresh 未兜底调用 _sync_header_buttons(按钮卡在折叠态无法自愈)")
+
+    def test_refresh_keeps_price_and_sig_folded_in_mini(self):
+        """refresh 必须感知 mini 并把价格/信号点文本写空 —— 否则每轮刷新会让折叠的列"复活"。
+
+        2026-09-10 实测问题: 切换瞬间折叠了价格/信号点, 但 refresh 每轮 config(text=...) 重新写入,
+        导致 mini 下信号灯与价格仍然显示。故要求在 refresh 内出现 price_l/sig_l 的 config(text="")。
+        """
+        refresh = next(f for f in self._hud.body
+                       if isinstance(f, ast.FunctionDef) and f.name == "refresh")
+        literals = {n.value for n in ast.walk(refresh)
+                    if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+        self.assertIn("mini", literals,
+                      "回归: refresh 未感知 mini(折叠列会被刷新写回)")
+        empty_text_targets = set()
+        for n in ast.walk(refresh):
+            if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                    and n.func.attr == "config" and isinstance(n.func.value, ast.Name)):
+                for kw in n.keywords:
+                    if (kw.arg == "text" and isinstance(kw.value, ast.Constant)
+                            and kw.value.value == ""):
+                        empty_text_targets.add(n.func.value.id)
+        self.assertIn("price_l", empty_text_targets,
+                      "回归: refresh 未在 mini 下把 price_l 文本清空(价格会重新显示)")
+        self.assertIn("sig_l", empty_text_targets,
+                      "回归: refresh 未在 mini 下把 sig_l 文本清空(信号灯会重新显示)")
+
+
 class TestMacWindowZoomDisabled(unittest.TestCase):
     """持续宽度守卫契约锁: 替代不存在的 -zoom 属性, refresh 每轮主动侦测并修正被放大的宽度。
 
@@ -2845,17 +3054,40 @@ class TestMacWindowZoomDisabled(unittest.TestCase):
                       "回归: width_locked 缺 'target' 键(宽度持续守卫失效)")
 
     def test_refresh_uses_target_for_force_restore(self):
-        """锁定: refresh 闭包内必须用 root.geometry 调用(兜底恢复被意外拉大的宽度)。
-        使用 AST 而非正则以忽略注释/docstring 干扰。"""
+        """锁定: 宽度兜底恢复链路完整 —— refresh 闭包内必须调用 _sync_window_width(),
+        且该函数(run_hud 内定义)内含 root.geometry 调用。
+
+        2026-09-10 重构: 原内联于 refresh 的宽度锁定/兜底逻辑抽为 _sync_window_width()
+        (mini 模式切换时也需立即重锁宽度), 故断言改为「refresh 调用该函数 + 函数内有 geometry」,
+        强度与原先等价(宽度被拉大后仍会强制恢复)。
+        """
+        # refresh 闭包内确实调用了 _sync_window_width()
+        calls_sync = any(
+            isinstance(n, ast.Call)
+            and ((isinstance(n.func, ast.Name) and n.func.id == "_sync_window_width")
+                 or (isinstance(n.func, ast.Attribute) and n.func.attr == "_sync_window_width"))
+            for n in ast.walk(self._refresh)
+        )
+        self.assertTrue(
+            calls_sync,
+            "回归: refresh 内未调用 _sync_window_width(宽度锁定/兜底链路断)",
+        )
+        # _sync_window_width 函数体内含 root.geometry 调用(强制恢复被拉大的宽度)
+        hud = next(n for n in self._tree.body
+                   if isinstance(n, ast.FunctionDef) and n.name == "run_hud")
+        sync_fn = next(
+            (f for f in hud.body
+             if isinstance(f, ast.FunctionDef) and f.name == "_sync_window_width"), None)
+        self.assertIsNotNone(sync_fn, "回归: run_hud 内缺 _sync_window_width 定义")
         calls_geometry = any(
             isinstance(n, ast.Call)
             and isinstance(n.func, ast.Attribute)
             and n.func.attr == "geometry"
-            for n in ast.walk(self._refresh)
+            for n in ast.walk(sync_fn)
         )
         self.assertTrue(
             calls_geometry,
-            "回归: refresh 闭包内未调用 root.geometry(宽度放大后无法强制恢复)",
+            "回归: _sync_window_width 内未调用 root.geometry(宽度放大后无法强制恢复)",
         )
 
     def test_run_hud_binds_configure_for_real_time_width_guard(self):
