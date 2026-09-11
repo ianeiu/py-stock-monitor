@@ -1018,6 +1018,8 @@ def _save_config_key(key: str, value, path: str = None) -> None:
             new_line = f"{key} = {'true' if value else 'false'}"
         elif isinstance(value, float):
             new_line = f"{key} = {repr(value)}"
+        elif isinstance(value, int):
+            new_line = f"{key} = {value}"          # 整数写裸数值(如 win_x = 120), 而非字符串
         else:
             new_line = f"{key} = {repr(str(value))}"
         lines = text.split('\n')
@@ -1057,6 +1059,67 @@ def set_topmost(root, on: bool) -> None:
     约定: 置顶为运行时态(启动从 config 读默认, 运行中切换, 不回写文件)。
     """
     root.attributes("-topmost", bool(on))
+
+
+def position_in_screen(x, y, sw: int, sh: int, margin: int = 40) -> bool:
+    """窗口左上角 (x, y) 是否落在屏幕可用范围内(容差 margin 像素)。
+
+    用于「记住拖拽位置」的健壮性: 分辨率变化 / 外接显示器被拔掉时, 记忆的位置可能落在屏幕外
+    -> 此时回退默认位置, 避免窗口"消失"在看不见的地方。
+    """
+    try:
+        return (-margin <= float(x) <= sw - margin) and (-margin <= float(y) <= sh - margin)
+    except (TypeError, ValueError):
+        return False
+
+
+def window_start_position(settings: dict, sw: int, sh: int,
+                          right_margin: int = 205) -> Tuple[int, int]:
+    """计算窗口初始位置 (x, y)。
+
+    优先使用上次拖拽保存的位置(config: win_x/win_y, 需通过屏幕范围校验);
+    无有效记忆时用默认: 水平靠右(屏幕宽 - right_margin), **垂直取屏幕高度 3/4 处**
+    (用户偏好: 靠右偏下, 2026-09-11)。
+
+    纯计算, 不触碰 Tk / 文件, 可直接无头单测。
+    """
+    x, y = settings.get("win_x"), settings.get("win_y")
+    if position_in_screen(x, y, sw, sh):
+        return int(x), int(y)
+    return max(0, int(sw) - right_margin), max(0, int(sh * 0.75))
+
+
+def apply_mac_borderless(win) -> None:
+    """去掉窗口标题栏/边框(overrideredirect, 跨平台); macOS 额外杜绝左上角红绿灯。
+
+    背景(2026-09-11): Tk 9 在打包 .app 环境、窗口被系统重新激活或属性被重置时,
+    `overrideredirect(True)` 偶发失效 —— 窗口重新长出标题栏与红绿灯。
+    故 macOS 上除 overrideredirect 外, 再用 Tk 的 MacWindowStyle 把窗口设成 `plain` + `none`
+    (即无 titleBar / closeBox / collapseBox / fullZoom)。
+
+    调用都 try 包裹: 异常或命令不可用时静默跳过, 不影响主流程与窗口可用性。
+    (Tk 9.0 仍内置 `::tk::unsupported::MacWindowStyle`, 其 class/attributes 名已在
+    libtcl9tk9.0.dylib 中确认: plain / none / closeBox / collapseBox / fullZoom ...)
+    """
+    try:
+        win.overrideredirect(True)          # 跨平台: 去标题栏/边框(Windows/Linux 也依赖)
+    except Exception:
+        pass
+    if sys.platform != "darwin":
+        return
+    try:
+        # 注意: 设置 MacWindowStyle 会让 Tk 重建底层窗口, 窗口尺寸被重置为系统默认值
+        # (远大于内容 -> 下方出现大片空白, 2026-09-11 实测)。故:
+        #   记下位置 -> 设样式 -> 清空显式尺寸(geometry "")让 Tk 重新按内容自适应 -> 恢复位置。
+        x, y = win.winfo_x(), win.winfo_y()
+        win.tk.call("::tk::unsupported::MacWindowStyle",
+                    "style", win._w, "plain", "none")
+        win.update_idletasks()
+        win.geometry("")                    # 清显式尺寸 -> 回到内容请求尺寸(shrink-to-fit)
+        win.geometry(f"+{x}+{y}")           # 位置保持不动
+        win.update_idletasks()
+    except Exception:
+        pass
 
 
 def load_stocks(settings: Optional[dict] = None) -> List[dict]:
@@ -1671,11 +1734,14 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
 
     root = tk.Tk()
     root.title("")
-    root.overrideredirect(True)           # 去标题栏/边框 -> 浮动
+    # 去标题栏/边框 -> 浮动。macOS 额外把窗口设成 plain+none(无红绿灯), 并置于其它
+    # 属性(topmost/alpha)设置之后再兜底一次 —— 这些属性在某些 Tk 版本上会重置窗口样式。
+    apply_mac_borderless(root)
     set_topmost(root, bool(settings.get("topmost", True)))  # 置顶(启动默认由 config 决定)
     root.attributes("-alpha", alpha)       # 透明度, 由 float_alpha 配置控制
     root.configure(bg=style["bg"])
     root.resizable(False, False)
+    apply_mac_borderless(root)             # 属性设置后再次应用(防样式被重置)
     # macOS: 禁用绿色放大按钮(macOS Tk 无直接 API; 本文依赖 overrideredirect 去标题栏 +
     # resizable 禁边缘缩放 + 下文的 refresh 宽度守卫 三管齐下。若窗口仍被放大(全屏手势等),
     # refresh 守卫每轮强制恢复原始宽度——这是唯一兜底, 不依赖平台专有属性)。
@@ -1746,19 +1812,34 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
 
     # mini 模式开关(header 最右): 点击后窗口只留行情行「名称 + 涨跌幅」与一个恢复按钮,
     # 信号区/状态栏/价格/信号点/工具按钮全部收起(运行时态, 不落盘)。
-    mini_btn = tk.Label(header, text=" mini ", bg=style["header"], fg=style["fg_dim"],
+    # mini 模式开关(header 右侧): 点击后窗口只留行情行「名称 + 涨跌幅」与恢复按钮。
+    # 模式持久化到 config(mini_mode): 下次启动沿用上次的模式。
+    # 注意: 此处 ui 字典尚未定义(L1997 才创建), 初始文案必须读 settings —— 否则
+    # UnboundLocalError 会在启动瞬间崩溃(2026-09-11 实际踩坑)。
+    mini_btn = tk.Label(header,
+                        text=(" full " if settings.get("mini_mode", False) else " mini "),
+                        bg=style["header"], fg=style["fg_dim"],
                         font=style["FONT_SM"], cursor="hand2")
     mini_btn.pack(side="left", padx=(0, 1))
     mini_btn._orig_text = mini_btn.cget("text")
     mini_btn._orig_padx = mini_btn.cget("padx")
 
     def _toggle_mini():
-        """切换 mini / 正常模式: 改状态 + 换按钮文案 + 应用显隐与窗口宽度。"""
+        """切换 mini / 正常模式: 改状态 + 持久化 + 换按钮文案 + 应用显隐与窗口宽度。"""
         ui["mini"] = not bool(ui.get("mini"))
         mini_btn.config(text=(" full " if ui["mini"] else " mini "))
+        _save_config_key("mini_mode", bool(ui["mini"]))   # 持久化模式, 下次启动沿用
         _apply_mini_mode()
 
     mini_btn.bind("<Button-1>", lambda e: _toggle_mini())
+
+    # 关闭按钮 ✕(header 最右): 静默退出; mini 与 full 两种模式都保留(不参与折叠)
+    close_btn = tk.Label(header, text=" ✕ ", bg=style["header"], fg=style["fg_dim"],
+                         font=style["FONT_SM"], cursor="hand2")
+    close_btn.pack(side="left", padx=(0, 1))
+    close_btn._orig_text = close_btn.cget("text")
+    close_btn._orig_padx = close_btn.cget("padx")
+    close_btn.bind("<Button-1>", lambda e: _quit())
 
     drag = {"x": 0, "y": 0}
 
@@ -1769,9 +1850,24 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     def do_drag(e):
         root.geometry(f"+{e.x_root - drag['x']}+{e.y_root - drag['y']}")
 
+    def end_drag(e=None):
+        """拖拽结束: 记住窗口位置, 下次启动沿用(config: win_x / win_y)。
+
+        仅松手时写盘一次(拖拽过程中不写, 避免每帧 IO); 写盘失败静默忽略(仅内存生效)。
+        """
+        try:
+            x, y = root.winfo_x(), root.winfo_y()
+            settings["win_x"] = x
+            settings["win_y"] = y
+            _save_config_key("win_x", x)
+            _save_config_key("win_y", y)
+        except Exception:
+            pass
+
     for w in (header, htitle):
         w.bind("<ButtonPress-1>", start_drag)
         w.bind("<B1-Motion>", do_drag)
+        w.bind("<ButtonRelease-1>", end_drag)
 
     # 鼠标移开自动淡出, 悬停恢复清晰(B1): 离开窗口降到淡出透明度, 进入恢复用户设定基值。
     # 注意: 不经由 _apply_alpha(它会持久化并覆盖基值), 直接改 -alpha 属性, 无几何抖动。
@@ -1890,6 +1986,8 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     # macOS 将 scrollWheel 投递给「键盘焦点」视图: 启动后把焦点给 body,
     # 否则 overrideredirect 窗口可能收不到滚轮事件(滚动条拖动不受影响)。
     root.after(300, lambda: (_silent_focus(root), _silent_focus(body)))
+    # macOS: 窗口映射/激活后系统可能重建窗口样式(红绿灯重现), 映射完成后再应用一次
+    root.after(400, lambda: apply_mac_borderless(root))
 
     def _silent_focus(w):
         try:
@@ -1912,7 +2010,7 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     # (Tk 非线程安全, 所有 widget.config 必须发生在主线程, 故经 refresh 的 root.after 循环执行)
     flash_pending: Dict[str, bool] = {}
     ui = {"topmost": bool(settings.get("topmost", True)), "show_signal": True,
-          "mini": False}   # mini: 只留行情行名称+涨跌幅的极简模式(运行时态, 不落盘)
+          "mini": bool(settings.get("mini_mode", False))}   # mini: 极简模式(持久化到 config.mini_mode)
     # 淡出基值: 用户设定的透明度, 鼠标移开淡出后以此还原(不被淡出值覆盖)
     ui["_alpha_base"] = alpha
     # 内联面板展开态(显式布尔, 不依赖 winfo_ismapped——macOS Tk 上该值不可信,
@@ -1926,6 +2024,54 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     # target: 锁定宽度值。不锁高度——高度由内容驱动(面板展开/加股票/信号行变化),
     #   通过 refresh 周期守卫兜底(1~10s)检测高度异常。如果在这里锁高度, 面板一展开就被截断。
     width_locked = {"v": False, "target": None}
+
+    # macOS 红绿灯兜底: 冷却时间戳(秒), 两次修正的最小间隔, 防止误判导致反复重设样式而抖动
+    borderless_fix = {"last": 0.0}
+    # 状态栏提示保持到期时间戳: 刷新循环在到期前不清空状态栏(让操作结果可见)
+    hint_hold = {"until": 0.0, "mini_shown": False}
+
+    def _sync_quote_canvas_height():
+        """行情画布高度 = 实际可见行数 × 估计行高(仅变化时才 config)。
+
+        原实现固定 5 行高度, 股票少于 5 只(或行高与估算不符)时画布内会留出空白;
+        模式切换 / 增删股票后统一由此校正(2026-09-11)。
+        """
+        try:
+            rows_n = max(1, min(len(stocks), QUOTE_VISIBLE_ROWS))
+            h = rows_n * QUOTE_ROW_H_EST
+            if int(body_canvas.cget("height")) != h:
+                body_canvas.config(height=h)
+        except Exception:
+            pass
+
+    def _enforce_borderless():
+        """macOS 窗口样式/尺寸周期兜底(带冷却, 正常时不触发)。
+
+        1) 标题栏 / 红绿灯重现(overrideredirect 失效) -> 重设窗口样式并补回置顶;
+        2) 高度异常(设置窗口样式会重建底层窗口, 尺寸被重置成系统默认值 -> 下方大片空白,
+           或此后窗口不再随内容变化) -> 清空显式尺寸 `geometry("")`, 让 Tk 重新按内容自适应。
+        判定: 无边框窗口 winfo_rooty() == winfo_y(); 出现标题栏时 rooty 比 y 大一个标题栏高度。
+        高度偏差阈值 40px: 窗口 resizable(False,False) 且无边框, 高度恒由内容驱动, 不存在
+        用户手动拉高的情形, 故偏差超阈值即为异常(过高/过矮都修正)。
+        """
+        if sys.platform != "darwin":
+            return
+        try:
+            now = time.time()
+            if now - borderless_fix["last"] <= 3.0:
+                return
+            if root.winfo_rooty() - root.winfo_y() > 0:
+                borderless_fix["last"] = now
+                apply_mac_borderless(root)
+                set_topmost(root, bool(ui.get("topmost", True)))
+                root.update_idletasks()
+                return
+            if abs(root.winfo_height() - root.winfo_reqheight()) > 40:
+                borderless_fix["last"] = now
+                root.geometry("")
+                root.update_idletasks()
+        except Exception:
+            pass
 
     def _sync_window_width():
         """同步窗口宽度: 未锁定时按当前内容理想宽锁定(minsize=maxsize), 已锁定时兜底纠正。
@@ -2217,7 +2363,9 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         """
         menu = tk.Menu(root, tearoff=0)
         menu.add_command(label="参数设置…", command=lambda: _open_param_panel(code))
-        menu.add_command(label=f"删除 {code}", command=lambda: _confirm_remove(code))
+        # from_menu=True: 右键菜单是明确意图, 不受「删除按钮已折叠」守卫限制
+        menu.add_command(label=f"删除 {code}",
+                         command=lambda: _confirm_remove(code, from_menu=True))
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -2616,22 +2764,114 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
                 return
         status.config(text=f"已添加 {parsed['name']} ({code})")
 
-    def _confirm_remove(code):
+    def _hint(text: str, secs: float = 6.0):
+        """状态栏提示并保持 secs 秒(刷新循环在此期间不清空它)。
+
+        删除/添加等操作结果需要用户看得见; 原实现写进 status 后会被下一轮 refresh(1~10s)
+        立即清空, 用户来不及看到 → 表现为「点了没反应」(2026-09-11)。
+        mini 模式下状态栏默认隐藏, 此时临时显示出来, 否则提示无处可见。
+        """
+        status.config(text=text)
+        hint_hold["until"] = time.time() + secs
+        if ui.get("mini"):
+            status.pack(fill="x", padx=2, pady=(0, 0))   # pack 幂等, 到期后由 refresh 收回
+            hint_hold["mini_shown"] = True
+
+    def _ask_yesno(title: str, msg: str) -> bool:
+        """确认框(自建 Toplevel 模态): 返回用户是否点了「确定」。
+
+        弃用系统 messagebox 的原因(2026-09-11 本机 Tk 9 实测):
+          1) 主窗口 -topmost(置顶)时系统对话框落在其**下层**, 用户看不到/点不到;
+          2) 系统对话框的返回值无法可靠判定 —— 用户点「是」仍被判为「否」,
+             表现为状态栏提示「已取消删除」但用户明明点了确定。
+        自建框: 显式置顶 + 按钮回调写结果 + wait_window 模态等待, 行为完全可控。
+        极端情况(自建失败)退回系统对话框: 取底层原始返回值做大小写/类型无关判定。
+        """
+        try:
+            result = {"ok": False}
+            top = tk.Toplevel(root)
+            top.title(title)
+            top.configure(bg=style["bg"])
+            top.resizable(False, False)
+            try:
+                top.attributes("-topmost", True)      # 必须浮在置顶主窗口之上
+            except Exception:
+                pass
+            # 对话框内用系统默认字体(不用浮窗的 7pt 小字号, 保证可读性)
+            tk.Label(top, text=msg, bg=style["bg"], fg=style["fg"],
+                     justify="left", wraplength=300).pack(padx=14, pady=(14, 10))
+            row = tk.Frame(top, bg=style["bg"])
+            row.pack(padx=14, pady=(0, 12))
+
+            def _close(ok: bool):
+                result["ok"] = bool(ok)
+                try:
+                    top.destroy()
+                except Exception:
+                    pass
+
+            tk.Button(row, text="确定", command=lambda: _close(True),
+                      bg=style["bg"], fg=style["fg"], cursor="hand2",
+                      relief="flat", padx=12, pady=3).pack(side="left", padx=(0, 8))
+            tk.Button(row, text="取消", command=lambda: _close(False),
+                      bg=style["bg"], fg=style["fg"], cursor="hand2",
+                      relief="flat", padx=12, pady=3).pack(side="left")
+            top.bind("<Return>", lambda e: _close(True))
+            top.bind("<Escape>", lambda e: _close(False))
+            top.protocol("WM_DELETE_WINDOW", lambda: _close(False))
+            # 居中于主窗口
+            root.update_idletasks()
+            x = root.winfo_x() + max(0, (root.winfo_width() - top.winfo_reqwidth()) // 2)
+            y = root.winfo_y() + max(0, (root.winfo_height() - top.winfo_reqheight()) // 2)
+            top.geometry(f"+{x}+{y}")
+            top.focus_force()
+            root.wait_window(top)              # 模态: 阻塞至对话框关闭
+            return bool(result["ok"])
+        except Exception as e:
+            status.config(text=f"确认框异常({e}), 退回系统对话框")
+        # 兜底: 系统对话框 + 底层原始返回值(大小写/类型无关判定)
+        try:
+            res = root.tk.call("tk_messageBox", "-type", "yesno", "-icon", "question",
+                               "-title", title, "-message", msg, "-parent", root._w)
+            return str(res).strip().lower() in ("yes", "true", "1")
+        except Exception:
+            if messagebox is not None:
+                return bool(messagebox.askyesno(title, msg, parent=root))
+            return False
+
+    def _confirm_remove(code, from_menu=False):
         """删除前弹出确认框(功能①): 点『是/Yes』才执行 _remove_stock, 否则取消(不删)。
 
-        仅做一层确认包装, 不改动 _remove_stock 内部逻辑; 无头测试不直接覆盖本函数。
+        from_menu=True 表示来自右键菜单 —— 右键菜单是明确的删除意图, 不受「删除按钮已折叠」
+        的误触守卫限制(2026-09-11 修复: 原守卫只看 settings.hide_del, 导致 hide_del=true 时
+        右键菜单删除被静默拦截, 表现为「删除功能失效」)。
+        每个分支都给状态栏提示(保持 6s), 便于定位「点了 YES 没删掉」这类问题。
         """
-        # 守卫: hide_del 开启时删除按钮已视觉隐藏, 拒绝误点
-        if bool(settings.get("hide_del", False)):
+        # 守卫: 删除按钮当前处于折叠态(「隐藏删除」开启 或 mini 模式)时, 左键点击可能误触 -> 拒绝
+        if not from_menu and (bool(settings.get("hide_del", False)) or ui.get("mini")):
+            _hint("删除按钮已隐藏; 请用右键菜单删除, 或在设置面板关闭「隐藏删除」")
             return
         st = next((s for s in stocks if s.get("code") == code), None)
         name = st.get("name", code) if st else code
-        if messagebox.askyesno("删除自选", f"确定删除 {name}（{code}）？", parent=root):
+        try:
+            ok = _ask_yesno("删除自选", f"确定删除 {name}（{code}）？")
+        except Exception as e:
+            # 确认框自身异常时给出可见提示, 避免静默失败
+            _hint(f"删除确认框打开失败: {e}")
+            return
+        if ok:
             _remove_stock(code)
+        else:
+            _hint("已取消删除")   # 便于区分「用户取消」与「确认后未生效」
 
     def _remove_stock(code):
-        """从内存列表 + GUI + stocks.toml 删除该自选(功能①)。"""
+        """从内存列表 + GUI + stocks.toml 删除该自选(功能①)。
+
+        每个分支都给出状态栏提示(保持 6s), 并在最后校验内存是否真的移除 —— 便于定位
+        「点了 YES 没删掉」这类问题(2026-09-11)。
+        """
         if not any(st["code"] == code for st in stocks):
+            _hint(f"{code} 不在列表中, 无需删除")
             return
         # 先取出待销毁的 frame(字典清理会 pop 这两个键, 需提前拿引用)
         qf = quote_frames.get(code)
@@ -2653,17 +2893,25 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             "move_btns": move_btns,
             "param_btns": param_btns,
         })
-        if qf is not None:
-            qf.destroy()
-        if sf_ is not None:
-            sf_.destroy()
+        try:
+            if qf is not None:
+                qf.destroy()
+            if sf_ is not None:
+                sf_.destroy()
+        except Exception as e:
+            _hint(f"删除 {code}: 界面移除失败 {e}(内存已删除)")
         if stocks_path:
             try:
                 rewrite_stocks_toml(stocks_path, remove=code)
             except Exception as e:
-                status.config(text=f"写入 stocks.toml 失败: {e}")
+                _hint(f"写入 stocks.toml 失败: {e}(内存已删除)")
                 return
-        status.config(text=f"已删除 {code}")
+        else:
+            _hint(f"已删除 {code}(未找到 stocks.toml, 仅本次会话生效)")
+            return
+        # 结果校验: 明确告知是否真的删掉(不依赖"看起来消失"的错觉)
+        still = any(s.get("code") == code for s in stocks)
+        _hint(f"已删除 {code}" if not still else f"删除失败: {code} 仍在列表")
 
     for st in stocks:
         _build_quote_row(st)
@@ -2689,11 +2937,13 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     status = tk.Label(center, text="连接中…", bg=style["bg"], fg=style["fg_dim"], font=style["FONT_SM"], anchor="w")
     status.pack(fill="x", padx=2, pady=(0, 0))
 
-    # 初始定位到右上角: 只设位置不设尺寸, 让 Tk 根据内容自适应(避免硬编码 205/280 过窄/过宽)。
+    # 初始位置: 优先用上次拖拽保存的位置(config: win_x/win_y), 否则默认「水平靠右 + 垂直 3/4」。
+    # 只设位置不设尺寸, 让 Tk 根据内容自适应(避免硬编码 205/280 过窄/过宽);
     # 首轮 refresh 时用 winfo_reqwidth() 捕获内容实际所需宽度并锁定, 不多不少。
     root.update_idletasks()
-    sw = root.winfo_screenwidth()
-    root.geometry(f"+{max(0, sw - 205)}+20")
+    _px, _py = window_start_position(settings, root.winfo_screenwidth(),
+                                     root.winfo_screenheight())
+    root.geometry(f"+{_px}+{_py}")
 
     # ---- 数据层 ----
     data: Dict[str, dict] = {}                 # code -> rec(最近一次成功)
@@ -2713,11 +2963,11 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         nxt = {1: 5, 3: 5, 5: 10, 10: 1}.get(cur, 1)
         # 切到 1 秒刷新频率极可能触发免费源限流/封禁, 需用户确认
         if refresh_requires_ban_warning(nxt):
-            ok = messagebox.askyesno(
+            # 同样经 _ask_yesno: 弹框期间临时取消置顶, 避免对话框被置顶主窗口遮住
+            ok = _ask_yesno(
                 "频率警告",
                 "1 秒刷新会非常频繁地请求行情数据源，可能被限流甚至封禁 IP。\n\n"
                 "确定仍要使用 1 秒刷新吗？",
-                parent=root,
             )
             if not ok:
                 return  # 用户取消, 保持当前频率不变
@@ -2823,7 +3073,16 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             body_scroll.pack_forget()
         else:
             body_scroll.pack(side="top", fill="both", expand=True)
-        # 7) 内容宽度已变 → 复位锁定并按新内容重新锁定(只锁宽不锁高)
+        # 7) 行情画布: 高度按实际可见行数校正(股票少于 5 只时不留空白), 并把滚动位置归零
+        _sync_quote_canvas_height()
+        try:
+            body_canvas.yview_moveto(0)      # 回到顶部, 避免切换后内容偏移
+        except Exception:
+            pass
+        # 8) 内容高度已变 -> 清显式尺寸让 Tk 按当前内容重算高度(位置保持不动), 再重锁宽度
+        x, y = root.winfo_x(), root.winfo_y()
+        root.geometry("")
+        root.geometry(f"+{x}+{y}")
         width_locked["v"] = False
         width_locked["target"] = None
         root.update_idletasks()
@@ -3184,7 +3443,7 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             sbb.configure(fg=style["fg_dim"])
             # sdot 语义色保持 sig_colors(由刷新循环按信号着色, 此处不动)
         # header 按钮(统一底色 + dim 高亮; 特殊高亮由各 toggle 自管)
-        for btn in (refresh_btn, add_btn, sig_btn, set_btn, mini_btn):
+        for btn in (refresh_btn, add_btn, sig_btn, set_btn, mini_btn, close_btn):
             btn.configure(bg=style["header"], fg=style["fg_dim"])
         root.update_idletasks()
 
@@ -3220,7 +3479,7 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         new = load_settings()
         for k in ("float_alpha", "grayness", "topmost", "show_signal",
                   "hide_sort", "hide_del", "hide_param",
-                  "csv_log", "notify", "float_theme",
+                  "csv_log", "mini_mode", "notify", "float_theme",
                   "float_font", "float_font_size", "refresh_sec"):
             if k in new:
                 settings[k] = new[k]
@@ -3241,6 +3500,15 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             _toggle_signal()
         # 隐藏排序/删除开关同步
         _apply_row_tools_visibility()
+        # 显示模式(full/mini)同步: 外部编辑 config 的 mini_mode 时即时应用
+        nm = bool(settings.get("mini_mode", False))
+        if nm != bool(ui.get("mini")):
+            ui["mini"] = nm
+            try:
+                mini_btn.config(text=(" full " if nm else " mini "))
+            except Exception:
+                pass
+            _apply_mini_mode()
 
     def _reload_stocks():
         """主线程执行: 重新读取 stocks.toml, 增量增删 + 按新顺序重排行情行, 不回写文件。"""
@@ -3416,6 +3684,10 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         _sync_window_width()
         # 兜底: mini 模式 header 按钮显隐每轮自愈(幂等, 状态一致时不产生 config 调用)
         _sync_header_buttons()
+        # 兜底: 行情画布高度跟随实际行数(增删股票后不留空白; 值未变时零开销)
+        _sync_quote_canvas_height()
+        # 兜底(macOS): 标题栏/红绿灯重现时重设窗口样式(带 3s 冷却, 通常不触发)
+        _enforce_borderless()
         for st in stocks:
             code = st["code"]
             # 信号行(下半)默认只展示有信号变动的股票; 信号提示关闭时一律隐藏(运行时态短路)
@@ -3467,8 +3739,14 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         # 仅离线时给出提示, 避免窗口常驻冗余信息。
         if offline:
             status.config(text="○ 离线(显示上次)  ·  重试中")
-        else:
+        elif time.time() >= hint_hold["until"]:
+            # 提示保持期内不清空(删/加等操作结果需让用户看见), 过期后才恢复常态清空
             status.config(text="")
+            if hint_hold.get("mini_shown"):
+                # mini 模式下 _hint 曾临时显示状态栏 -> 到期收回, 恢复极简布局
+                hint_hold["mini_shown"] = False
+                if ui.get("mini"):
+                    status.pack_forget()
         root.after(250, refresh)
 
     t = threading.Thread(target=worker, daemon=True)
@@ -3476,6 +3754,10 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     # 配置热重载守护线程(B5): 每 2s 轮询文件 mtime, 外部改动时主线程安全重载
     tw = threading.Thread(target=_watcher, daemon=True)
     tw.start()
+    # 启动即按 config 恢复显示模式(mini_mode): 应用显隐并按新内容重锁宽度,
+    # 避免先以 full 布局显示再切换(mini_mode 在 ui 初始化时已读入)
+    if ui.get("mini"):
+        _apply_mini_mode()
     root.after(250, refresh)
     root.mainloop()
 

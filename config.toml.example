@@ -24,6 +24,18 @@ csv_dedup_sec = 60
 # GUI 设置面板可随时切换, 运行中即时生效
 csv_log = true
 
+# ---- 窗口位置(运行时自动记录, 一般无需手改) ----
+# win_x / win_y: 上次拖拽后窗口左上角坐标(拖动浮窗松手时自动写入)
+# 首次启动、或记录的位置超出屏幕(换分辨率/拔显示器)时, 回退默认: 屏幕右侧 + 垂直 3/4 处
+# 删除这两行即可恢复默认位置
+# win_x = 1180
+# win_y = 480
+
+# ---- 显示模式 ----
+# mini_mode(默认 false=full): true 时启动即进入 mini 极简模式(每行只留 股票名+涨跌幅,
+# 隐藏信号区/状态栏/价格/信号灯/工具按钮/滚动条); 点击 header 的 mini/full 按钮切换时自动写回
+mini_mode = false
+
 # ---- 浮窗外观 ----
 # float_theme: light(亮) / dark(暗) / auto(跟随系统, mac 读 defaults, win 读注册表)
 float_theme = "light"

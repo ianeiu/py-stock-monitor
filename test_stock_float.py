@@ -2985,6 +2985,250 @@ class TestMiniModeContract(unittest.TestCase):
             self.assertTrue(guarded,
                             "回归: _on_select 无条件覆盖显示名(应仅在显示名为空时兜底)")
 
+    def test_quote_canvas_height_syncs_with_row_count(self):
+        """行情画布高度须随实际行数校正, 且 refresh 每轮兜底。
+
+        2026-09-11: 原固定 5 行高度, 股票少于 5 只或行高与估算不符时画布内会留出空白
+        (用户反馈「股票区上面多了一块」), 故抽 _sync_quote_canvas_height 并在切换/刷新时调用。
+        """
+        self.assertIn("_sync_quote_canvas_height", self._hud_names,
+                      "回归: 缺 _sync_quote_canvas_height(画布高度不随行数校正)")
+        refresh = next(f for f in self._hud.body
+                       if isinstance(f, ast.FunctionDef) and f.name == "refresh")
+        called = any(
+            isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+            and n.func.id == "_sync_quote_canvas_height"
+            for n in ast.walk(refresh)
+        )
+        self.assertTrue(called, "回归: refresh 未同步画布高度(增删股票后留白)")
+        mini = next(f for f in self._hud.body
+                    if isinstance(f, ast.FunctionDef) and f.name == "_apply_mini_mode")
+        mini_calls = {n.func.id for n in ast.walk(mini)
+                      if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+        self.assertIn("_sync_quote_canvas_height", mini_calls,
+                      "回归: mini 切换时未同步画布高度(模式切换后留白)")
+
+    def test_confirm_remove_distinguishes_menu_entry(self):
+        """删除守卫必须区分调用来源(2026-09-11 修复「删除功能失效」)。
+
+        原 `_confirm_remove` 只看 settings.hide_del 就在开头 return —— 而 config 里
+        hide_del=true 时连右键菜单的「删除」也被静默拦截, 用户点了毫无反应。
+        修复: 增加 from_menu 参数(右键菜单=明确意图, 跳过误触守卫), 且拦截时给状态栏提示;
+        守卫同时感知 mini 模式(该模式下删除按钮同样被折叠)。
+        """
+        hud = next(n for n in self._tree.body
+                   if isinstance(n, ast.FunctionDef) and n.name == "run_hud")
+        funcs = {f.name: f for f in hud.body if isinstance(f, ast.FunctionDef)}
+        self.assertIn("_confirm_remove", funcs)
+        cr = funcs["_confirm_remove"]
+        arg_names = [a.arg for a in cr.args.args]
+        self.assertIn("from_menu", arg_names,
+                      "回归: _confirm_remove 缺 from_menu 参数(右键删除会被误触守卫拦下)")
+        # 守卫须同时看 hide_del 与 mini
+        src_fn = ast.dump(cr)
+        self.assertIn("hide_del", src_fn)
+        self.assertIn("mini", src_fn, "回归: 删除守卫未感知 mini 模式")
+        # 拦截时必须有可见反馈(不再静默失败); 提示统一走 _hint(保持数秒可见)
+        self.assertIn("_hint", src_fn, "回归: 守卫拦截时无任何提示(静默失败, 用户不知为何没删掉)")
+        # 右键菜单必须以 from_menu=True 调用
+        menu = funcs["_show_row_menu"]
+        passed_true = any(
+            isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Name) and n.func.id == "_confirm_remove"
+            and any(kw.arg == "from_menu" and isinstance(kw.value, ast.Constant)
+                    and kw.value.value is True for kw in n.keywords)
+            for n in ast.walk(menu)
+        )
+        self.assertTrue(passed_true,
+                        "回归: 右键菜单未以 from_menu=True 调用 _confirm_remove(删除仍被拦截)")
+
+    def test_ask_yesno_uses_custom_modal_dialog(self):
+        """确认框必须自建模态框 + 自身置顶 + 仍保留系统对话框兜底。
+
+        2026-09-11 两轮实测结论:
+        - 系统 messagebox 被置顶(-topmost)主窗口遮住 → 用户看不到/点不到;
+        - 系统对话框返回值不可靠 → 点「是」被判为「否」(状态栏显示「已取消删除」)。
+        最终方案: 自建 Toplevel —— 按钮回调直接写结果(可控) + -topmost(浮在主窗口上) +
+        wait_window(模态); 自建失败再退回系统对话框(底层原始返回值 + 大小写无关判定)。
+        删除/频率警告两处弹框都必须走这个统一出口。
+        """
+        hud = next(n for n in self._tree.body
+                   if isinstance(n, ast.FunctionDef) and n.name == "run_hud")
+        funcs = {f.name: f for f in hud.body if isinstance(f, ast.FunctionDef)}
+        self.assertIn("_ask_yesno", funcs, "回归: 缺 _ask_yesno 统一弹框出口")
+        fn = funcs["_ask_yesno"]
+        calls = {n.func.id for n in ast.walk(fn)
+                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+        attrs = {n.func.attr for n in ast.walk(fn)
+                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
+        self.assertIn("Toplevel", attrs, "回归: 确认框未自建 Toplevel(返回不可控/被遮挡)")
+        self.assertIn("wait_window", attrs, "回归: 自建确认框未模态等待(wait_window)")
+        self.assertIn("_close", calls, "回归: 自建框未通过按钮回调写结果(返回值不可控)")
+        literals = {n.value for n in ast.walk(fn)
+                    if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+        self.assertIn("-topmost", literals, "回归: 确认框未置顶(会被置顶主窗口遮住)")
+        self.assertIn("tk_messageBox", literals, "回归: 缺系统对话框兜底")
+        # 两处弹框都必须走 _ask_yesno, 且不直接调 messagebox.ask*
+        for name in ("_confirm_remove", "_cycle_freq"):
+            self.assertIn(name, funcs)
+            body = funcs[name]
+            called = {n.func.id for n in ast.walk(body)
+                      if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+            self.assertIn("_ask_yesno", called,
+                          f"回归: {name} 未走 _ask_yesno(对话框会被置顶主窗口遮挡)")
+            direct = [n for n in ast.walk(body)
+                      if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                      and n.func.attr.startswith("ask")]
+            self.assertFalse(direct, f"回归: {name} 仍直接调用 messagebox.ask*(绕过统一出口)")
+
+    def test_status_hint_hold_mechanism(self):
+        """操作结果提示需保持可见(不被刷新循环秒清), 且 hint_hold 参与 refresh 清空判断。
+
+        2026-09-11: 删除/添加结果写进状态栏后被下一轮 refresh(1~10s) 立即清空, 用户来不及
+        看到 → 表现为「点了没反应」。修复 = _hint() 设置保持到期时间, refresh 到期前不清空。
+        """
+        hud = next(n for n in self._tree.body
+                   if isinstance(n, ast.FunctionDef) and n.name == "run_hud")
+        funcs = {f.name: f for f in hud.body if isinstance(f, ast.FunctionDef)}
+        self.assertIn("_hint", funcs, "回归: 缺 _hint(操作结果提示无法保持)")
+        self.assertIn("hint_hold", self._src, "回归: 缺 hint_hold(提示保持机制丢失)")
+        refresh = funcs["refresh"]
+        uses_hold = (
+            any(isinstance(n, ast.Name) and n.id == "hint_hold" for n in ast.walk(refresh))
+            and any(isinstance(n, ast.Constant) and n.value == "until"
+                    for n in ast.walk(refresh))
+        )
+        self.assertTrue(uses_hold,
+                        "回归: refresh 未参考 hint_hold['until'](提示仍会被秒清)")
+        # 删除链路的各分支必须走 _hint(而非直接 status.config)
+        rem = funcs["_remove_stock"]
+        hints = [n for n in ast.walk(rem)
+                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                 and n.func.id == "_hint"]
+        self.assertGreaterEqual(len(hints), 3,
+                                "回归: _remove_stock 分支提示不足(无法定位删除卡在哪一步)")
+
+    def test_ask_yesno_robust_return_parsing(self):
+        """确认框返回值须做大小写/类型无关判定, 且保留标准实现兜底。
+
+        2026-09-11: tkinter askyesno 以字符串常量 "yes" 比较判定, 个别 Tk 版本返回值大小写/
+        类型有差异会误判为「否」→ 用户点 YES 却没删掉。故改走底层 tk_messageBox + lower() 判定。
+        """
+        hud = next(n for n in self._tree.body
+                   if isinstance(n, ast.FunctionDef) and n.name == "run_hud")
+        funcs = {f.name: f for f in hud.body if isinstance(f, ast.FunctionDef)}
+        fn = funcs["_ask_yesno"]
+        self.assertTrue(
+            any(isinstance(n, ast.Constant) and n.value == "tk_messageBox"
+                for n in ast.walk(fn)),
+            "回归: _ask_yesno 未用底层 tk_messageBox(返回值可能被误判为「否」)")
+        self.assertTrue(
+            any(isinstance(n, ast.Attribute) and n.attr == "lower" for n in ast.walk(fn)),
+            "回归: 确认框返回值未做大小写无关判定")
+        self.assertTrue(
+            any(isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                and n.func.attr == "askyesno" for n in ast.walk(fn)),
+            "回归: 缺标准实现兜底(底层调用失败时无法弹框)")
+
+    def test_mini_mode_persisted_and_restored(self):
+        """显示模式(full/mini)必须持久化(config: mini_mode)并在启动/热重载时恢复。
+
+        2026-09-11: 用户要求模式跟随配置, 重启后保持上次的模式。
+        """
+        hud = next(n for n in self._tree.body
+                   if isinstance(n, ast.FunctionDef) and n.name == "run_hud")
+        funcs = {f.name: f for f in hud.body if isinstance(f, ast.FunctionDef)}
+        self.assertIn('"mini_mode"', self._src, "回归: 未定义 mini_mode 配置键")
+        # _toggle_mini 切换时写盘
+        lits = {n.value for n in ast.walk(funcs["_toggle_mini"])
+                if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+        self.assertIn("mini_mode", lits, "回归: 切换模式时未持久化 mini_mode")
+        # 热重载键列表包含 mini_mode(外部编辑 config 后即时同步)
+        reload_lits = {n.value for n in ast.walk(funcs["_reload_settings"])
+                       if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+        self.assertIn("mini_mode", reload_lits, "回归: _reload_settings 未同步 mini_mode")
+        # 启动即恢复(在 run_hud 顶层语句里调用 _apply_mini_mode, 非嵌套函数内部)
+        found = False
+        for stmt in hud.body:
+            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for n in ast.walk(stmt):
+                if (isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                        and n.func.id == "_apply_mini_mode"):
+                    found = True
+        self.assertTrue(found, "回归: 启动时未按 mini_mode 恢复显示模式")
+
+    def test_close_button_visible_in_both_modes(self):
+        """header 必须有 ✕ 关闭按钮并绑定退出, 且**不参与 mini 折叠**(两种模式都要有)。"""
+        hud = next(n for n in self._tree.body
+                   if isinstance(n, ast.FunctionDef) and n.name == "run_hud")
+        funcs = {f.name: f for f in hud.body if isinstance(f, ast.FunctionDef)}
+        self.assertIn("close_btn", self._src, "回归: header 缺关闭按钮")
+        # 关闭按钮不得被 mini 折叠(否则 mini 模式下没有关闭入口)
+        sync_names = {n.id for n in ast.walk(funcs["_sync_header_buttons"])
+                      if isinstance(n, ast.Name)}
+        self.assertNotIn("close_btn", sync_names,
+                         "回归: close_btn 被纳入 header 折叠列表(mini 模式下会消失)")
+        # 按需已绑定点事件
+        binds = [n for n in ast.walk(hud)
+                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                 and n.func.attr == "bind"]
+        bound = any(isinstance(n.func.value, ast.Name) and n.func.value.id == "close_btn"
+                    for n in binds)
+        self.assertTrue(bound, "回归: close_btn 未绑定点击事件")
+        # header 显隐统一委托 _sync_header_buttons(其折叠列表已确认不含 close_btn)
+        mini_calls = {n.func.id for n in ast.walk(funcs["_apply_mini_mode"])
+                      if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+        self.assertIn("_sync_header_buttons", mini_calls,
+                      "回归: _apply_mini_mode 未委托 header 显隐(可能误折叠关闭按钮)")
+
+    def test_state_dicts_not_used_before_definition(self):
+        """AST 顺序检查: run_hud 内状态字典不得在定义前被引用(否则启动即 UnboundLocalError)。
+
+        2026-09-11 实际事故: mini_btn 在 header 区(L1817)读了 `ui`, 而 `ui` 字典在 L1997 才创建
+        -> 源码与打包版都「启动闪退」。此测试锁定这类"引用早于定义"的顺序错误。
+        注: Lambda 体内的引用(runtime 才求值, 如 bind 回调)不计入。
+        """
+        hud = next(n for n in self._tree.body
+                   if isinstance(n, ast.FunctionDef) and n.name == "run_hud")
+        state_names = ("ui", "panel_state", "width_locked", "hint_hold",
+                       "borderless_fix", "panel_state")
+
+        def loaded_names(node):
+            """收集 Name(Load), 跳过 Lambda 子树(其引用运行时才求值)。"""
+            out = set()
+
+            def walk(n):
+                if isinstance(n, ast.Lambda):
+                    return
+                if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load):
+                    out.add(n.id)
+                for ch in ast.iter_child_nodes(n):
+                    walk(ch)
+
+            walk(node)
+            return out
+
+        defined = set()
+        for stmt in hud.body:
+            new = set()
+            for node in ast.walk(stmt):
+                if isinstance(node, ast.Assign):
+                    for t in node.targets:
+                        if isinstance(t, ast.Name):
+                            new.add(t.id)
+                elif (isinstance(node, (ast.AnnAssign, ast.AugAssign))
+                        and isinstance(node.target, ast.Name)):
+                    new.add(node.target.id)
+            if isinstance(stmt, ast.FunctionDef):
+                new.add(stmt.name)
+            else:
+                used = loaded_names(stmt)
+                for name in state_names:
+                    if name in used and name not in defined:
+                        self.fail(f"回归: {name} 在定义前被引用 -> 启动即 UnboundLocalError(闪退)")
+            defined |= new
+
     def test_header_buttons_sync_extracted_and_called_every_refresh(self):
         """_sync_header_buttons 必须存在, 且 refresh 每轮调用(header 按钮显隐自愈)。
 
@@ -3028,6 +3272,186 @@ class TestMiniModeContract(unittest.TestCase):
                       "回归: refresh 未在 mini 下把 price_l 文本清空(价格会重新显示)")
         self.assertIn("sig_l", empty_text_targets,
                       "回归: refresh 未在 mini 下把 sig_l 文本清空(信号灯会重新显示)")
+
+
+class TestMacBorderless(unittest.TestCase):
+    """macOS 去红绿灯: apply_mac_borderless 双保险(overrideredirect + MacWindowStyle plain/none)。
+
+    2026-09-11: Tk 9 / .app 打包环境下 overrideredirect 偶发失效, 窗口重新长出标题栏与
+    左上角红绿灯。修复 = overrideredirect 之外再设 MacWindowStyle plain+none(无任何按钮),
+    并在启动后延迟 + refresh 周期兜底(检测到标题栏重现则重设)。
+    """
+
+    class _FakeRoot:
+        """桩 Tk 根窗口: 记录 overrideredirect / tk.call / geometry 调用, 可选择性抛异常。"""
+
+        def __init__(self, raise_over=False, raise_call=False, x=100, y=50):
+            self._w = "."
+            self.over_calls = []
+            self.tk_calls = []
+            self.geometry_calls = []
+            self._x, self._y = x, y
+            self._raise_over = raise_over
+            self._raise_call = raise_call
+            self.tk = self        # 让 root.tk.call 落到自身
+
+        def overrideredirect(self, v):
+            self.over_calls.append(v)
+            if self._raise_over:
+                raise RuntimeError("overrideredirect boom")
+
+        def call(self, *args):
+            self.tk_calls.append(args)
+            if self._raise_call:
+                raise RuntimeError("tk call boom")
+
+        def winfo_x(self):
+            return self._x
+
+        def winfo_y(self):
+            return self._y
+
+        def geometry(self, spec=None):
+            self.geometry_calls.append(spec)
+
+        def update_idletasks(self):
+            pass
+
+    def test_non_darwin_still_removes_border(self):
+        """非 macOS: 仍要 overrideredirect(True) 去标题栏, 只是不调 MacWindowStyle。
+
+        (2026-09-11 自查修正: 初版在非 darwin 直接 return, 会让 Windows/Linux 丢失去边框)
+        """
+        r = self._FakeRoot()
+        with mock.patch.object(sf.sys, "platform", "linux"):
+            sf.apply_mac_borderless(r)
+        self.assertEqual(r.over_calls, [True], "非 macOS 也必须去标题栏")
+        self.assertEqual(r.tk_calls, [], "非 macOS 不应调用 MacWindowStyle")
+        self.assertEqual(r.geometry_calls, [], "非 macOS 不应改窗口几何")
+
+    def test_darwin_applies_overrideredirect_and_style(self):
+        """macOS: 调 overrideredirect(True) + MacWindowStyle plain/none, 并在之后恢复几何。
+
+        2026-09-11 实测坑: MacWindowStyle 会重建底层窗口, 尺寸被重置为系统默认值(下方
+        出现大片空白), 故必须 `geometry("")` 回到内容自适应 + 恢复原位置。
+        """
+        r = self._FakeRoot(x=120, y=60)
+        with mock.patch.object(sf.sys, "platform", "darwin"):
+            sf.apply_mac_borderless(r)
+        self.assertEqual(r.over_calls, [True])
+        self.assertEqual(
+            r.tk_calls,
+            [("::tk::unsupported::MacWindowStyle", "style", ".", "plain", "none")],
+        )
+        self.assertEqual(r.geometry_calls, ["", "+120+60"],
+                         "回归: 设样式后未重置几何(窗口会留下系统默认尺寸的大片空白)")
+
+    def test_exceptions_are_swallowed(self):
+        """两个调用任一失败都不抛异常, 且互不影响(over 失败仍尝试设置样式)。"""
+        r1 = self._FakeRoot(raise_over=True)
+        with mock.patch.object(sf.sys, "platform", "darwin"):
+            sf.apply_mac_borderless(r1)          # 不应抛
+        self.assertEqual(len(r1.tk_calls), 1, "overrideredirect 失败不应阻断样式设置")
+
+        r2 = self._FakeRoot(raise_call=True)
+        with mock.patch.object(sf.sys, "platform", "darwin"):
+            sf.apply_mac_borderless(r2)          # 不应抛
+        self.assertEqual(r2.over_calls, [True])
+
+    def test_run_hud_uses_borderless_helper_and_periodic_guard(self):
+        """AST 契约: run_hud 必须调用 apply_mac_borderless, 且 refresh 内有 _enforce_borderless 兜底。"""
+        src = Path(sf.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        hud = next(n for n in tree.body
+                   if isinstance(n, ast.FunctionDef) and n.name == "run_hud")
+        hud_names = {f.name for f in hud.body if isinstance(f, ast.FunctionDef)}
+        self.assertIn("_enforce_borderless", hud_names,
+                      "回归: run_hud 缺 _enforce_borderless(红绿灯重现无法自愈)")
+        called = [n for n in ast.walk(hud)
+                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                  and n.func.id == "apply_mac_borderless"]
+        self.assertGreaterEqual(len(called), 2,
+                                "回归: apply_mac_borderless 应至少调用两次(属性设置前后各一次)")
+        refresh = next(f for f in hud.body
+                       if isinstance(f, ast.FunctionDef) and f.name == "refresh")
+        guard_called = any(
+            isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+            and n.func.id == "_enforce_borderless"
+            for n in ast.walk(refresh)
+        )
+        self.assertTrue(guard_called,
+                        "回归: refresh 未调用 _enforce_borderless(标题栏重现无人修正)")
+
+
+class TestWindowPositionMemory(unittest.TestCase):
+    """窗口位置: 记住拖拽位置 + 默认「水平靠右 + 垂直屏幕 3/4 处」(2026-09-11)。
+
+    用户诉求: 打开后不要固定右上角, 而是沿用上次拖到的位置; 首次默认落在右侧偏下的 3/4 处。
+    """
+
+    def test_default_position_right_and_three_quarter(self):
+        x, y = sf.window_start_position({}, 1440, 900)
+        self.assertEqual(x, 1440 - 205, "默认水平位置应为屏幕宽 - 右边距")
+        self.assertEqual(y, int(900 * 0.75), "默认垂直位置应为屏幕高度的 3/4")
+
+    def test_saved_position_wins(self):
+        self.assertEqual(sf.window_start_position({"win_x": 300, "win_y": 400}, 1440, 900),
+                         (300, 400))
+
+    def test_saved_position_out_of_screen_falls_back(self):
+        """记忆位置越界(换分辨率/拔显示器) -> 回退默认, 避免窗口消失在屏幕外。"""
+        x, y = sf.window_start_position({"win_x": 5000, "win_y": 5000}, 1440, 900)
+        self.assertEqual((x, y), (1440 - 205, int(900 * 0.75)))
+
+    def test_string_numbers_accepted(self):
+        """兼容历史写盘格式(整数曾被写成字符串 '300')。"""
+        self.assertEqual(sf.window_start_position({"win_x": "300", "win_y": "400"}, 1440, 900),
+                         (300, 400))
+
+    def test_position_in_screen_bounds(self):
+        """判据: 左上角须在 [−margin, 屏幕尺寸 − margin] 内(容差 40px)。"""
+        self.assertTrue(sf.position_in_screen(0, 0, 1440, 900))
+        self.assertTrue(sf.position_in_screen(1400, 860, 1440, 900), "距右下边缘 40px 内仍算有效")
+        self.assertFalse(sf.position_in_screen(1410, 100, 1440, 900), "超出屏幕右侧容差 -> 无效")
+        self.assertFalse(sf.position_in_screen(2000, 100, 1440, 900))
+        self.assertFalse(sf.position_in_screen(None, 100, 1440, 900))
+        self.assertFalse(sf.position_in_screen("abc", 100, 1440, 900))
+
+    def test_drag_end_persists_position(self):
+        """AST 契约: 必须绑定 <ButtonRelease-1> 并在松手时写 win_x / win_y。"""
+        tree = ast.parse(Path(sf.__file__).read_text(encoding="utf-8"))
+        hud = next(n for n in tree.body
+                   if isinstance(n, ast.FunctionDef) and n.name == "run_hud")
+        funcs = {f.name: f for f in hud.body if isinstance(f, ast.FunctionDef)}
+        self.assertIn("end_drag", funcs, "回归: 缺 end_drag(拖拽位置不会被记住)")
+        lits = {n.value for n in ast.walk(funcs["end_drag"])
+                if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+        for key in ("win_x", "win_y"):
+            self.assertIn(key, lits, f"回归: end_drag 未持久化 {key}")
+        binds = [n for n in ast.walk(hud)
+                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                 and n.func.attr == "bind"]
+        bound = any(
+            any(isinstance(a, ast.Constant) and a.value == "<ButtonRelease-1>" for a in n.args)
+            for n in binds
+        )
+        self.assertTrue(bound, "回归: 未绑定 <ButtonRelease-1>(松手时不会保存位置)")
+
+    def test_save_config_key_writes_bare_int(self):
+        """整数键写成裸数值(win_x = 120)而非字符串, 保证 TOML 语义正确。"""
+        tmp = Path(tempfile.mkdtemp())
+        cfg = tmp / "config.toml"
+        cfg.write_text('[settings]\nfloat_theme = "light"\n', encoding="utf-8")
+        sf._save_config_key("win_x", 120, str(cfg))
+        text = cfg.read_text(encoding="utf-8")
+        self.assertIn("win_x = 120", text)
+        self.assertNotIn("'120'", text)
+        # 既有的 bool / 字符串行为不变(bool -> true, 字符串 -> 引号包裹, 单双引号均属合法 TOML)
+        sf._save_config_key("topmost", True, str(cfg))
+        sf._save_config_key("float_theme", "dark", str(cfg))
+        text = cfg.read_text(encoding="utf-8")
+        self.assertIn("topmost = true", text)
+        self.assertRegex(text, r"float_theme = ['\"]dark['\"]")
 
 
 class TestMacWindowZoomDisabled(unittest.TestCase):
