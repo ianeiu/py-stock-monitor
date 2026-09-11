@@ -1833,21 +1833,25 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
 
     mini_btn.bind("<Button-1>", lambda e: _toggle_mini())
 
-    # 关闭按钮 ✕(header 最右): 静默退出; mini 与 full 两种模式都保留(不参与折叠)
+    # 关闭按钮 ✕(菜单栏最右侧, side="right" 贴右边缘): 静默退出;
+    # mini 与 full 两种模式都保留(不参与 header 折叠列表)
     close_btn = tk.Label(header, text=" ✕ ", bg=style["header"], fg=style["fg_dim"],
                          font=style["FONT_SM"], cursor="hand2")
-    close_btn.pack(side="left", padx=(0, 1))
+    close_btn.pack(side="right", padx=(2, 2))
     close_btn._orig_text = close_btn.cget("text")
     close_btn._orig_padx = close_btn.cget("padx")
     close_btn.bind("<Button-1>", lambda e: _quit())
 
-    drag = {"x": 0, "y": 0}
+    drag = {"x": 0, "y": 0, "active": False}   # active: 本次按下是否允许拖窗(交互控件为 False)
 
     def start_drag(e):
         drag["x"] = e.x_root - root.winfo_x()
         drag["y"] = e.y_root - root.winfo_y()
+        drag["active"] = True          # 本次拖拽生效(由 _root_drag_press 判定是否允许)
 
     def do_drag(e):
+        if not drag.get("active"):
+            return                     # 按下时被判定为"交互控件" -> 不做窗口拖动
         root.geometry(f"+{e.x_root - drag['x']}+{e.y_root - drag['y']}")
 
     def end_drag(e=None):
@@ -1855,6 +1859,7 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
 
         仅松手时写盘一次(拖拽过程中不写, 避免每帧 IO); 写盘失败静默忽略(仅内存生效)。
         """
+        drag["active"] = False
         try:
             x, y = root.winfo_x(), root.winfo_y()
             settings["win_x"] = x
@@ -1864,10 +1869,48 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         except Exception:
             pass
 
+    def _drag_allowed(w) -> bool:
+        """该控件上的左键按下是否应触发窗口拖动。
+
+        判断依据 = 控件是否有**自身的左键语义**:
+        - 按钮式 Label: 项目内所有按钮统一 cursor=hand2 -> 拒绝(交给它自己的 handler);
+        - 输入框 / 列表 / 滑块 / 滚动条 / 系统按钮 -> 拒绝;
+        - 行情行 / 信号行: 点击=复制代码, 构建时标了 `_no_drag` -> 拒绝;
+        - 其余(窗口/内容区/画布/状态栏/面板空白等背景控件) -> 允许拖拽。
+        """
+        if getattr(w, "_no_drag", False):
+            return False
+        try:
+            if isinstance(w, (tk.Entry, tk.Listbox, tk.Scale, tk.Scrollbar,
+                              tk.Text, tk.Button)):
+                return False
+            cur = str(w.cget("cursor") or "").lower()
+            if cur in ("hand2", "pointinghand", "hand"):
+                return False
+        except Exception:
+            pass
+        return True
+
+    def _root_drag_press(e):
+        """窗口层拖拽入口: 空白/背景处按下左键即拖动窗口。
+
+        绑在 root(toplevel) 上 —— 子控件事件沿 bindtags(widget -> class -> toplevel -> all)
+        到达这里, 因此**所有区域都被覆盖**: 交互控件已在各自的 handler 里处理完, 这里再按
+        `_drag_allowed` 让路(不启动拖拽), 互不干扰。
+        """
+        if not _drag_allowed(e.widget):
+            drag["active"] = False     # 明确关掉, 避免上一轮残留状态导致误拖
+            return
+        start_drag(e)
+
     for w in (header, htitle):
         w.bind("<ButtonPress-1>", start_drag)
         w.bind("<B1-Motion>", do_drag)
         w.bind("<ButtonRelease-1>", end_drag)
+    # 空白处拖拽(全局兜底): 覆盖行情区/信号区/状态栏/各面板背景等所有非交互区域
+    root.bind("<ButtonPress-1>", _root_drag_press, add="+")
+    root.bind("<B1-Motion>", do_drag, add="+")
+    root.bind("<ButtonRelease-1>", end_drag, add="+")
 
     # 鼠标移开自动淡出, 悬停恢复清晰(B1): 离开窗口降到淡出透明度, 进入恢复用户设定基值。
     # 注意: 不经由 _apply_alpha(它会持久化并覆盖基值), 直接改 -alpha 属性, 无几何抖动。
@@ -2169,6 +2212,8 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         rows[code] = (sig_l, name_l, price_l, chg_l, dl_l)
         quote_frames[code] = f
         row_vis[code] = True
+        # 行情行不参与"空白处拖拽": 点它的语义是复制代码(见 _on_row_click)
+        f._no_drag = True
         # 右键菜单: 参数设置 + 删除(功能①④)——保留, 非 macOS 用户仍可用; mac 上以 ⚙/🗑 兜底
         f.bind("<Button-3>", lambda e, c=code: _show_row_menu(e, c))
         # 左键点击行情行(非工具按钮区域)复制股票代码(B2)
@@ -2936,6 +2981,11 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     # ---- 底部状态 ----
     status = tk.Label(center, text="连接中…", bg=style["bg"], fg=style["fg_dim"], font=style["FONT_SM"], anchor="w")
     status.pack(fill="x", padx=2, pady=(0, 0))
+
+    # ---- 拖拽增强(2026-09-11): 空白/背景处均可拖动窗口 ----
+    # 拖拽入口已统一绑在 root 上(见上方 _root_drag_press), 覆盖所有非交互区域,
+    # 因此这里无需再逐个容器绑定。
+
 
     # 初始位置: 优先用上次拖拽保存的位置(config: win_x/win_y), 否则默认「水平靠右 + 垂直 3/4」。
     # 只设位置不设尺寸, 让 Tk 根据内容自适应(避免硬编码 205/280 过窄/过宽);

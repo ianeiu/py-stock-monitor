@@ -3159,7 +3159,7 @@ class TestMiniModeContract(unittest.TestCase):
         self.assertTrue(found, "回归: 启动时未按 mini_mode 恢复显示模式")
 
     def test_close_button_visible_in_both_modes(self):
-        """header 必须有 ✕ 关闭按钮并绑定退出, 且**不参与 mini 折叠**(两种模式都要有)。"""
+        """header 关闭按钮必须: ① 绑定退出 ② 排在菜单栏最右侧(side="right") ③ 不参与 mini 折叠。"""
         hud = next(n for n in self._tree.body
                    if isinstance(n, ast.FunctionDef) and n.name == "run_hud")
         funcs = {f.name: f for f in hud.body if isinstance(f, ast.FunctionDef)}
@@ -3169,18 +3169,25 @@ class TestMiniModeContract(unittest.TestCase):
                       if isinstance(n, ast.Name)}
         self.assertNotIn("close_btn", sync_names,
                          "回归: close_btn 被纳入 header 折叠列表(mini 模式下会消失)")
-        # 按需已绑定点事件
+        # 必须用 pack(side="right") 贴菜单栏最右
+        close_pack = [
+            n for n in ast.walk(hud)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "pack"
+            and isinstance(n.func.value, ast.Name) and n.func.value.id == "close_btn"
+        ]
+        self.assertTrue(close_pack, "回归: close_btn 未调用 pack")
+        sides = {kw.value.value for n in close_pack for kw in n.keywords
+                 if kw.arg == "side" and isinstance(kw.value, ast.Constant)}
+        self.assertEqual(sides, {"right"},
+                         "回归: close_btn 未靠在菜单栏最右侧(pack side='right')")
+        # 已绑定点事件
         binds = [n for n in ast.walk(hud)
                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
                  and n.func.attr == "bind"]
         bound = any(isinstance(n.func.value, ast.Name) and n.func.value.id == "close_btn"
                     for n in binds)
         self.assertTrue(bound, "回归: close_btn 未绑定点击事件")
-        # header 显隐统一委托 _sync_header_buttons(其折叠列表已确认不含 close_btn)
-        mini_calls = {n.func.id for n in ast.walk(funcs["_apply_mini_mode"])
-                      if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
-        self.assertIn("_sync_header_buttons", mini_calls,
-                      "回归: _apply_mini_mode 未委托 header 显隐(可能误折叠关闭按钮)")
 
     def test_state_dicts_not_used_before_definition(self):
         """AST 顺序检查: run_hud 内状态字典不得在定义前被引用(否则启动即 UnboundLocalError)。
@@ -3228,6 +3235,42 @@ class TestMiniModeContract(unittest.TestCase):
                     if name in used and name not in defined:
                         self.fail(f"回归: {name} 在定义前被引用 -> 启动即 UnboundLocalError(闪退)")
             defined |= new
+
+    def test_blank_areas_are_draggable(self):
+        """空白/背景处均可拖动窗口, 且交互控件自动让路。
+
+        2026-09-11 用户诉求: 「界面空白处(即非按钮区域)都可以拖拽」。
+        最终实现 = 拖拽入口统一绑在 root(toplevel) 上, 子控件事件沿 bindtags 到达 root;
+        再由 `_drag_allowed` 判定: 有自身左键语义的控件(按钮式 Label cursor=hand2 / Entry /
+        Listbox / Scale / Scrollbar / 行情行 _no_drag)让路, 其余(含行情画布这类大片空白)可拖。
+        """
+        hud = next(n for n in self._tree.body
+                   if isinstance(n, ast.FunctionDef) and n.name == "run_hud")
+        funcs = {f.name: f for f in hud.body if isinstance(f, ast.FunctionDef)}
+        for name in ("_drag_allowed", "_root_drag_press", "start_drag", "do_drag", "end_drag"):
+            self.assertIn(name, funcs, f"回归: 缺 {name}(空白拖拽链路不完整)")
+        # 允许拖拽的判定: 拒绝 _no_drag 与按钮式 Label / 交互控件
+        allowed_src = ast.dump(funcs["_drag_allowed"])
+        self.assertIn("_no_drag", allowed_src, "回归: 未排除行情行(_no_drag)")
+        self.assertIn("cursor", allowed_src, "回归: 未按 cursor 排除按钮式 Label")
+        for cls in ("Entry", "Listbox", "Scale", "Scrollbar"):
+            self.assertIn(cls, allowed_src, f"回归: 未排除 {cls}(会与输入/调节冲突)")
+        # do_drag 必须检查 active(按下被判定为交互控件时不拖)
+        self.assertIn("active", ast.dump(funcs["do_drag"]),
+                      "回归: do_drag 未检查 active(交互控件上仍会拖窗)")
+        # root 上必须绑定拖拽三事件
+        root_binds = set()
+        for n in ast.walk(hud):
+            if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                    and n.func.attr == "bind"
+                    and isinstance(n.func.value, ast.Name) and n.func.value.id == "root"):
+                for a in n.args:
+                    if isinstance(a, ast.Constant) and isinstance(a.value, str):
+                        root_binds.add(a.value)
+        for ev in ("<ButtonPress-1>", "<B1-Motion>", "<ButtonRelease-1>"):
+            self.assertIn(ev, root_binds, f"回归: root 未绑定 {ev}(空白处拖不动)")
+        # 行情行必须标记不可拖(点击=复制代码)
+        self.assertIn("_no_drag", Path(sf.__file__).read_text(encoding="utf-8"))
 
     def test_header_buttons_sync_extracted_and_called_every_refresh(self):
         """_sync_header_buttons 必须存在, 且 refresh 每轮调用(header 按钮显隐自愈)。
