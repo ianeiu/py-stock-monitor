@@ -3272,6 +3272,63 @@ class TestMiniModeContract(unittest.TestCase):
         # 行情行必须标记不可拖(点击=复制代码)
         self.assertIn("_no_drag", Path(sf.__file__).read_text(encoding="utf-8"))
 
+    def test_mini_mode_uses_mini_dim_fg(self):
+        """mini 模式下名称与涨跌幅统一用 **mini 专用淡色**(style["mini_dim"])。
+
+        2026-09-11~14 演进: 先"不要涨跌色" -> 两次"太明显/再降一档"(fg -> fg_dim -> flat)
+        -> 用户仍嫌明显 -> 新增主题键 mini_dim(flat 向背景色混 45%, 比 flat 更淡, 深浅主题各自适配)。
+        名称与涨跌幅都改用它; 三处必须一致:
+        ① 切换模式(_apply_mini_mode) ② 每轮刷新(refresh) ③ 主题重刷(_reapply_style)。
+        """
+        hud = next(n for n in self._tree.body
+                   if isinstance(n, ast.FunctionDef) and n.name == "run_hud")
+        funcs = {f.name: f for f in hud.body if isinstance(f, ast.FunctionDef)}
+        self.assertIn('"mini_dim"', self._src, "回归: build_style 缺 mini_dim 主题键")
+        refresh = funcs["refresh"]
+        mini_ifs = [n for n in ast.walk(refresh)
+                    if isinstance(n, ast.If) and "mini" in ast.dump(n.test)]
+        self.assertTrue(mini_ifs, "回归: refresh 未按 mini 模式分支处理颜色")
+        self.assertTrue(
+            any(isinstance(n, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id in ("col",) for t in n.targets)
+                and "mini_dim" in ast.dump(n.value)
+                for n in ast.walk(refresh)),
+            "回归: refresh 未在 mini 下把涨跌幅颜色改为 mini_dim",
+        )
+        for name in ("_apply_mini_mode", "_reapply_style"):
+            self.assertIn("'mini_dim'", ast.dump(funcs[name]),
+                          f"回归: {name} 未把 mini 下名称/涨跌幅设为 mini_dim(会被改回深色/涨跌色)")
+
+    def test_mini_width_narrower_and_side_bar_hidden(self):
+        """mini 再收窄: 下限 96 + 折叠恒空的延时列 + 股票一屏放得下时隐藏 ▲▼ 侧栏。
+
+        2026-09-11 用户要求「mini 模式下整个界面宽度再小点」。原 floor=120 顶着实际内容
+        (~85-95px); 收窄手段 = ①floor 降 96 ②dl_l(恒空, width=2 占 ~8px) 折叠 ③side_bar
+        (▲▼, ~12px) 在行数 ≤ 可视行数时整栏隐藏, 行数变多自动恢复。
+        """
+        hud = next(n for n in self._tree.body
+                   if isinstance(n, ast.FunctionDef) and n.name == "run_hud")
+        funcs = {f.name: f for f in hud.body if isinstance(f, ast.FunctionDef)}
+        self.assertIn("floor = 96 if ui.get(\"mini\") else 180", self._src,
+                      "回归: mini 宽度下限应为 96")
+        # dl_l 折叠: _apply_row_tools_visibility 的 mini 分支必须处理 _dl
+        tools_fn = funcs["_apply_row_tools_visibility"]
+        mini_seg = ast.dump(tools_fn)
+        self.assertIn("_dl", mini_seg, "回归: 恒空的延时列未在 mini 下折叠")
+        # 构建时必须记录 dl_l 的原始宽度(退出 mini 还原用)
+        self.assertIn("dl_l._orig_width", self._src,
+                      "回归: dl_l 未记录原始宽度(退出 mini 无法还原)")
+        # 侧栏动态显隐: _sync_side_bar 存在, 用 winfo_manager 幂等判定, 且被两处调用
+        self.assertIn("_sync_side_bar", self._hud_names, "回归: 缺 _sync_side_bar")
+        sb = funcs["_sync_side_bar"]
+        sb_src = ast.dump(sb)
+        self.assertIn("winfo_manager", sb_src, "回归: _sync_side_bar 未做幂等判定(反复 pack 会抖动)")
+        for caller in ("_apply_mini_mode", "_sync_quote_canvas_height"):
+            called = any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                         and n.func.id == "_sync_side_bar"
+                         for n in ast.walk(funcs[caller]))
+            self.assertTrue(called, f"回归: {caller} 未调用 _sync_side_bar")
+
     def test_header_buttons_sync_extracted_and_called_every_refresh(self):
         """_sync_header_buttons 必须存在, 且 refresh 每轮调用(header 按钮显隐自愈)。
 
@@ -3424,6 +3481,23 @@ class TestMacBorderless(unittest.TestCase):
         )
         self.assertTrue(guard_called,
                         "回归: refresh 未调用 _enforce_borderless(标题栏重现无人修正)")
+
+
+class TestMixHex(unittest.TestCase):
+    """_mix_hex: 十六进制颜色按比例混合(mini 专用淡色的生成基础)。"""
+
+    def test_mix_half(self):
+        # #8a8f98 向 #f7f7f7 混 0.5 -> 各通道取中点(Python round 半数取偶)
+        self.assertEqual(sf._mix_hex("#8a8f98", "#f7f7f7", 0.5), "#c0c3c8")
+
+    def test_mix_endpoints(self):
+        self.assertEqual(sf._mix_hex("#8a8f98", "#f7f7f7", 0.0), "#8a8f98")
+        self.assertEqual(sf._mix_hex("#8a8f98", "#f7f7f7", 1.0), "#f7f7f7")
+
+    def test_clamp_and_invalid(self):
+        self.assertEqual(sf._mix_hex("#8a8f98", "#f7f7f7", 2.0), "#f7f7f7")   # 越界 clamp
+        self.assertEqual(sf._mix_hex("not-a-color", "#f7f7f7", 0.5), "not-a-color")
+        self.assertEqual(sf._mix_hex(None, "#f7f7f7", 0.5), None)             # 非法 c1 原样返回
 
 
 class TestWindowPositionMemory(unittest.TestCase):

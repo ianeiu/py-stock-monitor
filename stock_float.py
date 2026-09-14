@@ -1617,6 +1617,24 @@ def desaturate(hex_str: str, amount: float) -> str:
     return "#{:02x}{:02x}{:02x}".format(out_r, out_g, out_b)
 
 
+def _mix_hex(c1: str, c2: str, t: float) -> str:
+    """按比例 t(0~1) 把十六进制颜色 c1 混向 c2(用于生成更淡/更暗的衍生色); 非法输入返回 c1。"""
+    def _parse(c):
+        m6 = re.fullmatch(r"#([0-9a-fA-F]{2})([0-9a-fA-F]{2})([0-9a-fA-F]{2})", c or "")
+        if m6:
+            return tuple(int(m6.group(i), 16) for i in (1, 2, 3))
+        m3 = re.fullmatch(r"#([0-9a-fA-F])([0-9a-fA-F])([0-9a-fA-F])", c or "")
+        if m3:
+            return tuple(int(m3.group(i) * 2, 16) for i in (1, 2, 3))
+        return None
+    a, b = _parse(c1), _parse(c2)
+    if a is None or b is None:
+        return c1
+    t = max(0.0, min(1.0, float(t)))
+    out = tuple(round(x * (1 - t) + y * t) for x, y in zip(a, b))
+    return "#{:02x}{:02x}{:02x}".format(*out)
+
+
 def detect_system_theme() -> str:
     """探测系统外观: 'light' | 'dark'。mac 读 defaults; win 读注册表 AppsUseLightTheme; 其它回退 light。"""
     try:
@@ -1666,6 +1684,9 @@ def build_style(settings: dict) -> dict:
         "down": desaturate(_hex_color(settings.get("float_down_color"), pal["down"]), grayness),
         "flat": pal["flat"], "dl": pal["dl"], "header": pal["header"], "sep": pal["sep"],
         "sig_colors": sig_colors,
+        # mini 专用淡色: flat 向背景色混 45%(比 flat 更淡一档), mini 下名称/涨跌幅统一用它;
+        # 深浅主题各自适配(浅色→更浅灰, 暗色→更暗灰)
+        "mini_dim": _mix_hex(pal["flat"], pal["bg"], 0.45),
         # 异动闪动高亮色: 与背景形成可辨对比但不过刺; 暗色用暖黄、亮色用浅黄
         "flash": ("#3a3a1e" if theme == "dark" else "#fff3b0"),
         "FONT": (font, size), "FONT_SM": (font, max(5, size - 1)), "ROW_H": 14,
@@ -2073,6 +2094,23 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     # 状态栏提示保持到期时间戳: 刷新循环在到期前不清空状态栏(让操作结果可见)
     hint_hold = {"until": 0.0, "mini_shown": False}
 
+    def _sync_side_bar():
+        """▲▼ 侧栏动态显隐(幂等): mini 且股票数 ≤ 可视行数时整栏隐藏, 省 ~12px 宽。
+
+        mini 下滚动条已收起, 侧栏只剩 ▲▼ 两个翻行入口 —— 股票一屏放得下时它们没有用途,
+        隐藏可让 mini 窗口更窄; 股票数超过可视行数(或退出 mini)时自动恢复。
+        用 winfo_manager() 判断当前几何管理器(可靠), 不查 winfo_ismapped(macOS 不可信)。
+        """
+        try:
+            want = (not ui.get("mini")) or len(stocks) > QUOTE_VISIBLE_ROWS
+            cur = side_bar.winfo_manager()
+            if want and cur != "pack":
+                side_bar.pack(side="right", fill="y")
+            elif not want and cur == "pack":
+                side_bar.pack_forget()
+        except Exception:
+            pass
+
     def _sync_quote_canvas_height():
         """行情画布高度 = 实际可见行数 × 估计行高(仅变化时才 config)。
 
@@ -2086,6 +2124,8 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
                 body_canvas.config(height=h)
         except Exception:
             pass
+        # 顺带同步 ▲▼ 侧栏显隐(行数变化时自动恢复/收起; 幂等, 状态一致时零开销)
+        _sync_side_bar()
 
     def _enforce_borderless():
         """macOS 窗口样式/尺寸周期兜底(带冷却, 正常时不触发)。
@@ -2120,12 +2160,12 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         """同步窗口宽度: 未锁定时按当前内容理想宽锁定(minsize=maxsize), 已锁定时兜底纠正。
 
         只锁宽度、不锁高度(高度由内容驱动)。width_locked 被复位时(如 mini 模式切换导致
-        内容宽度变化)会按新内容重新锁定; mini 模式的下限更窄(120 vs 常规 180)。
+        内容宽度变化)会按新内容重新锁定; mini 模式的下限更窄(96 vs 常规 180)。
         """
         w = root.winfo_width()
         if not width_locked["v"]:
             req_w = max(root.winfo_reqwidth(), body.winfo_reqwidth())
-            floor = 120 if ui.get("mini") else 180
+            floor = 96 if ui.get("mini") else 180
             target = max(req_w - 150, floor)
             if target > 0:
                 root.minsize(target, 1)
@@ -2179,6 +2219,10 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         chg_l.pack(side="left", padx=(3, 0))
         dl_l = tk.Label(f, text="", bg=style["bg"], fg=style["dl"], font=style["FONT_SM"], width=2, anchor="w")
         dl_l.pack(side="left")
+        # dl_l 恒为空文本(延时标记已并入股票名), 但 width=2 仍占 ~8px; mini 下会宽度折叠它
+        dl_l._orig_text = dl_l.cget("text")
+        dl_l._orig_width = dl_l.cget("width")
+        dl_l._orig_padx = dl_l.cget("padx")
         # 可见删除按钮(功能①): 先 pack 故位于最右角; 左键直接删除。
         del_btn = tk.Label(f, text="🗑", bg=style["bg"], fg=style["fg_dim"],
                            font=style["FONT_SM"], cursor="hand2")
@@ -2266,17 +2310,19 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         hide_sort = bool(settings.get("hide_sort", False)) or mini
         hide_del = bool(settings.get("hide_del", False)) or mini
         hide_param = bool(settings.get("hide_param", False)) or mini
-        # mini: 折叠左侧信号点与价格列(只留股票名 + 涨跌幅); 退出时按原始宽度还原
+        # mini: 折叠左侧信号点与价格列(只留名称 + 涨跌幅), 并折叠恒为空的延时列; 退出时按原始宽度还原
         for code, (_sig, _name, _price, _chg, _dl) in list(rows.items()):
             if not (_sig.winfo_exists() and _price.winfo_exists()):
                 continue
             if mini:
                 _sig.config(text="", width=0, padx=0)
                 _price.config(text="", width=0, padx=0)
+                _dl.config(text="", width=0, padx=0)
             else:
                 _sig.config(text=_sig._orig_text, width=_sig._orig_width, padx=_sig._orig_padx)
                 _price.config(text=_price._orig_text, width=_price._orig_width,
                               padx=_price._orig_padx)
+                _dl.config(width=_dl._orig_width, padx=_dl._orig_padx)
         for code, (up_btn, down_btn) in list(move_btns.items()):
             # 防御: 跳过已被 destroy 的残留引用(如极端情况下删除股票后未清理干净的 code),
             # 避免对已销毁 widget 调 .config() 抛 TclError: invalid command name
@@ -3118,11 +3164,26 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             sigpane.pack_forget()
         # 5) 行情行内的信号点/价格/工具按钮由统一出口处理(同时覆盖 hide_* 配置)
         _apply_row_tools_visibility()
-        # 6) 侧栏滚动条: mini 隐藏(▲▼ 箭头保留, 滚动入口不丢); 可视行数与常规模式一致(5 行)
+        # 5b) 名称/涨跌幅颜色: mini 用 mini 专用淡色(mini_dim), 退出时恢复
+        #     (名称=主文字色, 涨跌幅按文本符号取涨跌色)。立即应用, 不等下一轮刷新。
+        for _code, (_s, _n, _p, _c, _d) in list(rows.items()):
+            try:
+                if on:
+                    _n.config(fg=style["mini_dim"])
+                    _c.config(fg=style["mini_dim"])
+                else:
+                    _n.config(fg=style["fg"])
+                    _t = str(_c.cget("text") or "")
+                    _c.config(fg=(up_color if _t.startswith("+")
+                                  else (down_color if _t.startswith("-") else style["flat"])))
+            except Exception:
+                pass
+        # 6) 侧栏: mini 下滚动条收起; ▲▼ 侧栏在股票一屏放得下时整栏隐藏(见 _sync_side_bar)
         if on:
             body_scroll.pack_forget()
         else:
             body_scroll.pack(side="top", fill="both", expand=True)
+        _sync_side_bar()
         # 7) 行情画布: 高度按实际可见行数校正(股票少于 5 只时不留空白), 并把滚动位置归零
         _sync_quote_canvas_height()
         try:
@@ -3476,15 +3537,20 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         for code, (sig_l, name_l, price_l, chg_l, dl_l) in rows.items():
             parent = name_l.master
             parent.configure(bg=style["bg"])
-            name_l.configure(fg=style["fg"])
+            if ui.get("mini"):
+                # mini 模式: 名称/涨跌幅固定用 mini 专用淡色(主题重刷后不被改回深色/涨跌色)
+                name_l.configure(fg=style["mini_dim"])
+                chg_l.configure(fg=style["mini_dim"])
+            else:
+                name_l.configure(fg=style["fg"])
+                t = chg_l.cget("text")
+                if t.startswith("+"):
+                    chg_l.configure(fg=up_color)
+                elif t.startswith("-"):
+                    chg_l.configure(fg=down_color)
             price_l.configure(fg=style["fg"])
             dl_l.configure(fg=style["dl"])
             sig_l.configure(fg=style["flat"])                  # 左侧中性信号点随灰度
-            t = chg_l.cget("text")
-            if t.startswith("+"):
-                chg_l.configure(fg=up_color)
-            elif t.startswith("-"):
-                chg_l.configure(fg=down_color)
         # 信号行
         for code, (sdot, slv, sbb) in sig_rows.items():
             parent = sdot.master
@@ -3753,7 +3819,8 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             chg = r.get("chg_pct")
             sig = r.get("signal")
             delayed = bool(r.get("delayed"))
-            name_l.config(text=format_stock_name(st["name"], delayed))
+            name_l.config(text=format_stock_name(st["name"], delayed),
+                          fg=(style["mini_dim"] if ui.get("mini") else style["fg"]))
             if ui.get("mini"):
                 # mini 模式: 价格列与信号点已折叠(宽度折叠靠「空文本」实现), 每轮刷新必须保持空文本,
                 # 否则会被重新写入文本而"复活"(2026-09-10 修复: 用户反馈信号灯/价格仍在)。
@@ -3765,6 +3832,9 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             # 涨跌幅: mini 与常规模式都保留(是 mini 模式的核心信息)
             if isinstance(chg, (int, float)):
                 col = up_color if chg > 0 else (down_color if chg < 0 else style["flat"])
+                if ui.get("mini"):
+                    # mini 模式: 涨跌幅与名称同为 mini 专用淡色(不套用配置的涨跌色)
+                    col = style["mini_dim"]
                 sign = "+" if chg > 0 else ""
                 chg_l.config(text=f"{sign}{chg:.2f}%", fg=col)
             else:
