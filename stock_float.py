@@ -2422,6 +2422,9 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         line1.pack(fill="x")
         sdot = tk.Label(line1, text="●", bg=style["bg"], fg=style["flat"], font=style["FONT"], width=2, anchor="w")
         sdot.pack(side="left")
+        # 记录原始文本/宽度: mini 模式下信号灯 ● 会被宽度折叠(2026-09-14 用户要求), 退出时还原
+        sdot._orig_text = sdot.cget("text")
+        sdot._orig_width = sdot.cget("width")
         snm = tk.Label(line1, text=st["name"], bg=style["bg"], fg=style["fg"], font=style["FONT_SM"], width=5, anchor="w")
         snm.pack(side="left")
         slv = tk.Label(line1, text="—", bg=style["bg"], fg=style["flat"], font=style["FONT_SM"], width=9, anchor="w")
@@ -3073,18 +3076,27 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
 
     # ---- 信号提示显隐开关(功能①: 运行时态, 不落盘) ----
     def _toggle_signal():
-        """切换信号提示显隐(功能①)。关闭时整块隐藏(含标题/分隔线/容器); 开启时恢复。"""
+        """切换信号提示显隐(功能①)。关闭时整块隐藏(含标题/分隔线/容器); 开启时恢复。
+
+        mini 模式下同样有效(2026-09-14: mini 保留信号提示区及其开关按钮)。
+        """
         ui["show_signal"] = not ui["show_signal"]
-        # mini 模式下信号区强制隐藏(该模式下 header 的 🔔 已折叠, 此处仅作状态一致性保护)
-        on = ui["show_signal"] and not ui.get("mini")
+        on = ui["show_signal"]
         # 整块显隐: 分隔线 / 信号标题 / 信号容器
         # 按 on 直接 pack/pack_forget(pack 对已映射控件幂等, pack_forget 对未映射是无操作),
-        # 不依赖 winfo_ismapped()(macOS Tk 上该值不可信, 会导致该隐不隐/该显不显)。
-        # before=status 维持原始上下顺序(否则布局错乱)。
+        # 不依赖 winfo_ismapped()(macOS Tk 上该值不可信)。
+        # full 模式下 status 已打包, 用 before=status 维持上下顺序;
+        # mini 下 status 被隐藏(pack_forget), before 引用未打包的窗口不可靠 -> 直接追加
+        # (此时 center 内排在前面的只有 body_wrap, 顺序仍然正确)。
         if on:
-            sep.pack(fill="x", padx=4, pady=1, before=status)
-            sighead.pack(fill="x", padx=4, pady=(0, 0), before=status)
-            sigpane.pack(fill="x", before=status)
+            if status.winfo_manager():
+                sep.pack(fill="x", padx=4, pady=1, before=status)
+                sighead.pack(fill="x", padx=4, pady=(0, 0), before=status)
+                sigpane.pack(fill="x", before=status)
+            else:
+                sep.pack(fill="x", padx=4, pady=1)
+                sighead.pack(fill="x", padx=4, pady=(0, 0))
+                sigpane.pack(fill="x")
         else:
             sep.pack_forget()
             sighead.pack_forget()
@@ -3099,18 +3111,18 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
         status.config(text=("🔔 信号提示开" if on else "🔕 信号提示关"))
         root.update_idletasks()
 
-    # ---- mini 模式: 窗口只留行情行「名称 + 涨跌幅」+ 一个恢复按钮 ----
+    # ---- mini 模式: 窗口只留行情行「名称 + 涨跌幅」+ 信号提示区(可开关) + 一个恢复按钮 ----
     def _sync_header_buttons():
         """按 ui['mini'] 无条件 apply header 按钮显隐(宽度折叠), 幂等。
 
-        mini: 折叠 ↺/🔔/＋/⚙(清文本 + 内边距归零 + 去手型光标), 只留 mini 按钮;
-        正常: 还原原始文本/内边距/光标(sig_btn 的 🔔/🔕 按当前 show_signal 状态还原)。
+        mini: 折叠 ↺/＋/⚙(清文本 + 内边距归零 + 去手型光标);
+        🔔 信号开关与 mini 按钮保留(2026-09-14: mini 也要能开关信号提示区), ✕ 关闭同样保留。
 
         用 cget("text") 判断当前态, 状态一致时不做 config(避免每轮无谓的 Tk 调用)。
         本函数在 mini 切换时调用, 并在 refresh 每轮兜底调用(某次 apply 异常可自愈)。
         """
         on = bool(ui.get("mini"))
-        for w in (refresh_btn, sig_btn, add_btn, set_btn):
+        for w in (refresh_btn, add_btn, set_btn):
             if on:
                 if str(w.cget("text") or "").strip():
                     w.config(text="", padx=0, cursor="")
@@ -3123,10 +3135,11 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
     def _apply_mini_mode():
         """按 ui['mini'] 应用 mini / 正常模式的显隐(纯视觉, 不落盘)。
 
-        mini: header 只留 mini 按钮; 隐藏分隔线/信号标题/信号容器/状态栏;
-              行情行折叠信号点与价格(只留股票名 + 涨跌幅)、折叠全部工具按钮;
-              隐藏侧栏滚动条(▲▼ 箭头保留); 可视行数与常规模式一致(5 行);
-              收起已展开的内联面板; 宽度按新内容重新锁定(更窄, 下限 120)。
+        mini: header 折叠 ↺/＋/⚙(🔔 信号开关与 mini/✕ 保留); 行情行折叠信号点与价格、
+              延时列与全部工具按钮(只留股票名 + 涨跌幅);
+              隐藏侧栏滚动条(▲▼ 侧栏在股票一屏放得下时整栏隐藏);
+              隐藏状态栏; **信号提示区保留**(由 show_signal 开关控制);
+              收起已展开的内联面板; 宽度按新内容重新锁定(更窄, 下限 96)。
         正常: 逐项还原(工具按钮按 hide_sort/hide_del/hide_param 恢复)。
         显隐一律「按目标态无条件 apply」, 不查 winfo_ismapped(macOS Tk 该值不可信)。
         """
@@ -3152,12 +3165,20 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
             status.pack_forget()
         else:
             status.pack(fill="x", padx=2, pady=(0, 0))
-        # 4) 分隔线/信号标题/信号容器: mini 或 show_signal=False 时隐藏
-        #    (先 pack status 再以 before=status 插入, 维持原有上下顺序)
-        if (not on) and ui["show_signal"]:
-            sep.pack(fill="x", padx=4, pady=1, before=status)
-            sighead.pack(fill="x", padx=4, pady=(0, 0), before=status)
-            sigpane.pack(fill="x", before=status)
+        # 4) 分隔线/信号标题/信号容器: 只由 show_signal 开关决定
+        #    (2026-09-14: mini 模式也保留信号提示区及其 🔔 开关)。
+        #    full 下 status 已打包 -> before=status 维持上下顺序;
+        #    mini 下 status 被隐藏 -> before 引用未打包的窗口不可靠, 直接追加
+        #    (center 内排在前面的只有 body_wrap, 顺序仍然正确)。
+        if ui["show_signal"]:
+            if status.winfo_manager():
+                sep.pack(fill="x", padx=4, pady=1, before=status)
+                sighead.pack(fill="x", padx=4, pady=(0, 0), before=status)
+                sigpane.pack(fill="x", before=status)
+            else:
+                sep.pack(fill="x", padx=4, pady=1)
+                sighead.pack(fill="x", padx=4, pady=(0, 0))
+                sigpane.pack(fill="x")
         else:
             sep.pack_forget()
             sighead.pack_forget()
@@ -3176,6 +3197,16 @@ def run_hud(stocks: List[dict], settings: dict, log_fn: Optional[Callable[[dict]
                     _t = str(_c.cget("text") or "")
                     _c.config(fg=(up_color if _t.startswith("+")
                                   else (down_color if _t.startswith("-") else style["flat"])))
+            except Exception:
+                pass
+        # 5c) 信号行: mini 下折叠信号灯 ●(宽度折叠, 省约 8px; 刷新循环只改其颜色不会复活),
+        #     退出时按原始宽度/文本还原。
+        for _code, (_sd, _sl, _sb) in list(sig_rows.items()):
+            try:
+                if on:
+                    _sd.config(text="", width=0)
+                else:
+                    _sd.config(text=_sd._orig_text, width=_sd._orig_width)
             except Exception:
                 pass
         # 6) 侧栏: mini 下滚动条收起; ▲▼ 侧栏在股票一屏放得下时整栏隐藏(见 _sync_side_bar)

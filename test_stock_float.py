@@ -3329,6 +3329,48 @@ class TestMiniModeContract(unittest.TestCase):
                          for n in ast.walk(funcs[caller]))
             self.assertTrue(called, f"回归: {caller} 未调用 _sync_side_bar")
 
+    def test_mini_mode_keeps_signal_area_and_toggle(self):
+        """mini 模式保留信号提示区及其 🔔 开关按钮(2026-09-14 用户要求)。
+
+        - _sync_header_buttons 的折叠列表不得含 sig_btn(mini 下也要能开关信号区);
+        - _apply_mini_mode 的信号区显隐只由 show_signal 决定(不再被 mini 强制隐藏);
+        - _toggle_signal 的 on 直接取 show_signal(无 mini 强制隐藏), 且必须处理
+          mini 下 status 未打包时 before=status 引用不可靠的问题(winfo_manager 分支);
+        - mini 下信号行的信号灯 ● 宽度折叠(2026-09-14 追加), 退出时还原(需 _orig_width)。
+        """
+        hud = next(n for n in self._tree.body
+                   if isinstance(n, ast.FunctionDef) and n.name == "run_hud")
+        funcs = {f.name: f for f in hud.body if isinstance(f, ast.FunctionDef)}
+        sync = funcs["_sync_header_buttons"]
+        for lp in ast.walk(sync):
+            if isinstance(lp, ast.For) and isinstance(lp.iter, ast.Tuple):
+                names = [e.id for e in lp.iter.elts if isinstance(e, ast.Name)]
+                self.assertNotIn("sig_btn", names,
+                                 "回归: 🔔 被纳入 mini 折叠(mini 下无法开关信号区)")
+        mini_fn = funcs["_apply_mini_mode"]
+        self.assertIn("show_signal", ast.dump(mini_fn),
+                      "回归: _apply_mini_mode 未按 show_signal 控制信号区")
+        # mini 下信号灯折叠: _apply_mini_mode 需处理 sig_rows 的宽度折叠
+        self.assertIn("sig_rows", ast.dump(mini_fn),
+                      "回归: _apply_mini_mode 未折叠信号行信号灯(mini 下 ● 仍在)")
+        self.assertIn("sdot._orig_width", self._src,
+                      "回归: sdot 未记录原始宽度(退出 mini 无法还原信号灯)")
+        ts = funcs["_toggle_signal"]
+
+        def _is_show_signal(n):
+            """ui["show_signal"] 的下标表达式。"""
+            return (isinstance(n, ast.Subscript) and isinstance(n.value, ast.Name)
+                    and n.value.id == "ui" and isinstance(n.slice, ast.Constant)
+                    and n.slice.value == "show_signal")
+
+        on_assigns = [n for n in ast.walk(ts)
+                      if isinstance(n, ast.Assign)
+                      and any(isinstance(t, ast.Name) and t.id == "on" for t in n.targets)]
+        self.assertTrue(any(_is_show_signal(a.value) for a in on_assigns),
+                        "回归: _toggle_signal 的 on 仍与 mini 组合(信号区在 mini 下会被强制隐藏)")
+        self.assertIn("winfo_manager", ast.dump(ts),
+                      "回归: _toggle_signal 未处理 mini 下 status 未打包时 before=status 不可靠的问题")
+
     def test_header_buttons_sync_extracted_and_called_every_refresh(self):
         """_sync_header_buttons 必须存在, 且 refresh 每轮调用(header 按钮显隐自愈)。
 
